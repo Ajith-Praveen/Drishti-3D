@@ -1,0 +1,118 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 620" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="a2" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 z" fill="#0f172a"/>
+    </marker>
+  </defs>
+
+  <text x="20" y="30" font-size="23" font-weight="700" fill="#0f172a">Innovation — The Observability Field</text>
+  <text x="20" y="54" font-size="15" fill="#475569">Every other tool outputs one undifferentiated mesh. Ours reports <tspan font-weight="700">what it actually measured</tspan>.</text>
+
+  <!-- flow -->
+  <rect x="20" y="76" width="212" height="62" rx="7" fill="#eff6ff" stroke="#2563eb" stroke-width="1.6"/>
+  <text x="126" y="101" font-size="13.5" font-weight="600" fill="#1e3a8a" text-anchor="middle">Bundle Adjustment</text>
+  <text x="126" y="122" font-size="12" fill="#475569" text-anchor="middle">normal equations</text>
+
+  <rect x="264" y="76" width="212" height="62" rx="7" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+  <text x="370" y="101" font-size="13.5" font-weight="700" fill="#78350f" text-anchor="middle">Schur complement</text>
+  <text x="370" y="122" font-size="12" fill="#78350f" text-anchor="middle">3×3 covariance per point</text>
+
+  <rect x="508" y="76" width="212" height="62" rx="7" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+  <text x="614" y="101" font-size="13.5" font-weight="700" fill="#78350f" text-anchor="middle">Uncertainty ellipsoid</text>
+  <text x="614" y="122" font-size="12" fill="#78350f" text-anchor="middle">anisotropic, not scalar</text>
+
+  <rect x="752" y="76" width="176" height="62" rx="7" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/>
+  <text x="840" y="101" font-size="13.5" font-weight="700" fill="#14532d" text-anchor="middle">Trust layer</text>
+  <text x="840" y="122" font-size="12" fill="#14532d" text-anchor="middle">per-vertex tier</text>
+
+  <rect x="960" y="76" width="164" height="62" rx="7" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/>
+  <text x="1042" y="101" font-size="13.5" font-weight="700" fill="#14532d" text-anchor="middle">Refly plan</text>
+  <text x="1042" y="122" font-size="12" fill="#14532d" text-anchor="middle">corrective line</text>
+
+  <g stroke="#0f172a" stroke-width="1.7">
+    <line x1="232" y1="107" x2="258" y2="107" marker-end="url(#a2)"/>
+    <line x1="476" y1="107" x2="502" y2="107" marker-end="url(#a2)"/>
+    <line x1="720" y1="107" x2="746" y2="107" marker-end="url(#a2)"/>
+    <line x1="928" y1="107" x2="954" y2="107" marker-end="url(#a2)"/>
+  </g>
+
+  <!-- A: trust layer -->
+  <rect x="20" y="160" width="386" height="266" rx="8" fill="#f8fafc" stroke="#cbd5e1"/>
+  <text x="40" y="186" font-size="15.5" font-weight="700" fill="#0f172a">A · Per-vertex trust tier</text>
+
+  <rect x="40" y="200" width="18" height="18" rx="3" fill="#16a34a"/>
+  <text x="68" y="214" font-size="13.5" font-weight="600" fill="#14532d">MEASURED</text>
+  <text x="180" y="214" font-size="12.5" fill="#475569">observed from multiple views</text>
+
+  <rect x="40" y="228" width="18" height="18" rx="3" fill="#f59e0b"/>
+  <text x="68" y="242" font-size="13.5" font-weight="600" fill="#78350f">LOW CONFIDENCE</text>
+  <text x="200" y="242" font-size="12.5" fill="#475569">thin observation</text>
+
+  <rect x="40" y="256" width="18" height="18" rx="3" fill="#dc2626"/>
+  <text x="68" y="270" font-size="13.5" font-weight="600" fill="#7f1d1d">INFERRED</text>
+  <text x="180" y="270" font-size="12.5" fill="#475569">never observed — filled by prior</text>
+
+  <text x="40" y="300" font-size="13" font-weight="700" fill="#0f172a">Survives export — verified round-trip</text>
+  <g font-size="12.5">
+    <text x="40" y="322" fill="#334155">LAS</text><text x="120" y="322" fill="#475569">extra-bytes dimension</text><text x="330" y="322" fill="#16a34a">✓</text>
+    <text x="40" y="342" fill="#334155">GLB</text><text x="120" y="342" fill="#475569">custom _CONFIDENCE attr</text><text x="330" y="342" fill="#16a34a">✓</text>
+    <text x="40" y="362" fill="#334155">PLY</text><text x="120" y="362" fill="#475569">custom scalar property</text><text x="330" y="362" fill="#16a34a">✓</text>
+  </g>
+  <rect x="40" y="378" width="346" height="36" rx="5" fill="#dcfce7"/>
+  <text x="52" y="401" font-size="12.5" font-weight="600" fill="#14532d">Measurement tools refuse to measure inferred geometry.</text>
+
+  <!-- B: refly -->
+  <rect x="426" y="160" width="386" height="266" rx="8" fill="#f8fafc" stroke="#cbd5e1"/>
+  <text x="446" y="186" font-size="15.5" font-weight="700" fill="#0f172a">B · Inverting the ellipsoid</text>
+  <text x="446" y="208" font-size="12.5" fill="#475569">The worst-constrained axis tells you which viewing</text>
+  <text x="446" y="226" font-size="12.5" fill="#475569">direction would collapse it.</text>
+
+  <line x1="466" y1="262" x2="726" y2="262" stroke="#dc2626" stroke-width="2.4"/>
+  <text x="596" y="252" font-size="11.5" fill="#7f1d1d" text-anchor="middle">original pass</text>
+  <ellipse cx="596" cy="320" rx="11" ry="34" fill="none" stroke="#dc2626" stroke-width="2" stroke-dasharray="4 3"/>
+  <circle cx="596" cy="320" r="5" fill="#dc2626"/>
+  <line x1="470" y1="372" x2="724" y2="292" stroke="#16a34a" stroke-width="2.4" stroke-dasharray="7 4"/>
+  <text x="560" y="392" font-size="11.5" font-weight="600" fill="#14532d">recommended corrective pass</text>
+
+  <rect x="446" y="400" width="346" height="16" fill="none"/>
+  <text x="446" y="412" font-size="12" font-style="italic" fill="#334155">"heading 072°, 80 m AGL, gimbal −35° → resolves 84%"</text>
+
+  <!-- C: honest accuracy -->
+  <rect x="832" y="160" width="292" height="266" rx="8" fill="#f8fafc" stroke="#cbd5e1"/>
+  <text x="852" y="186" font-size="15.5" font-weight="700" fill="#0f172a">C · Honest accuracy</text>
+  <text x="852" y="208" font-size="12.5" fill="#475569">Every team will claim "≤1 m".</text>
+  <text x="852" y="226" font-size="12.5" fill="#475569">With standalone GPS that is</text>
+  <text x="852" y="244" font-size="12.5" font-weight="700" fill="#b91c1c">physically impossible.</text>
+
+  <g font-size="12.5">
+    <rect x="852" y="258" width="252" height="26" fill="#1e293b"/>
+    <text x="864" y="276" font-weight="700" fill="#fff">Accuracy</text>
+    <text x="988" y="276" font-weight="700" fill="#fff">GPS</text>
+    <text x="1050" y="276" font-weight="700" fill="#fff">RTK</text>
+
+    <rect x="852" y="284" width="252" height="26" fill="#fff"/>
+    <text x="864" y="302" fill="#0f172a">Relative</text>
+    <text x="988" y="302" fill="#16a34a">&lt; 1 m</text>
+    <text x="1050" y="302" fill="#16a34a">&lt; 1 m</text>
+
+    <rect x="852" y="310" width="252" height="26" fill="#f8fafc"/>
+    <text x="864" y="328" fill="#0f172a">Absolute</text>
+    <text x="988" y="328" fill="#b91c1c">2–5 m</text>
+    <text x="1050" y="328" fill="#16a34a">1–3 cm</text>
+  </g>
+  <rect x="852" y="348" width="252" height="66" rx="5" fill="#dbeafe"/>
+  <text x="864" y="369" font-size="12" fill="#1e3a8a">We report both separately, and</text>
+  <text x="864" y="386" font-size="12" fill="#1e3a8a">claim centimetres only when RTK</text>
+  <text x="864" y="403" font-size="12" fill="#1e3a8a">input is detected — enforced in code.</text>
+
+  <!-- bottom claim -->
+  <rect x="20" y="442" width="1104" height="82" rx="8" fill="#1e293b"/>
+  <text x="40" y="468" font-size="14" font-weight="700" fill="#fbbf24">WHAT IS OURS vs WHAT IS PUBLISHED</text>
+  <text x="40" y="492" font-size="13" fill="#cbd5e1">Not ours: MapAnything · bundle adjustment · TSDF · SIFT · Umeyama — all published, all cited.</text>
+  <text x="40" y="513" font-size="13.5" font-weight="700" fill="#fff">Ours: the observability field, the trust layer, the corrective flight plan, and the offline deployable tool.</text>
+
+  <rect x="20" y="534" width="1104" height="70" rx="8" fill="#fffbeb" stroke="#f59e0b" stroke-width="1.6"/>
+  <text x="40" y="557" font-size="13" fill="#78350f">Per-point covariance has existed since ~2018. Next-best-view planning since 2012. Those two research lines</text>
+  <text x="40" y="576" font-size="13" fill="#78350f"><tspan font-weight="700">diverged.</tspan> We close the loop — specifically in the single-pass degenerate regime, where the uncertainty is</text>
+  <text x="40" y="595" font-size="13" fill="#78350f">largest, most anisotropic, and most decision-relevant.</text>
+</svg>

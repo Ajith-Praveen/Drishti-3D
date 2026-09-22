@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 600" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+<text x="20" y="30" font-size="23" font-weight="700" fill="#0f172a">Technology Stack</text>
+<text x="20" y="54" font-size="15" fill="#475569">Every choice justified against a constraint the problem statement imposes</text>
+
+<g font-size="12.5">
+<rect x="20" y="72" width="1104" height="30" fill="#1e293b"/>
+<text x="36" y="92" font-weight="700" fill="#fff">Component</text>
+<text x="300" y="92" font-weight="700" fill="#fff">Technology</text>
+<text x="610" y="92" font-weight="700" fill="#fff">Why this choice</text>
+
+<rect x="20" y="102" width="1104" height="34" fill="#f8fafc"/>
+<text x="36" y="124" fill="#0f172a">Desktop interface</text>
+<text x="300" y="124" fill="#1e40af" font-weight="600">PySide6 (Qt6) + VTK</text>
+<text x="610" y="124" fill="#475569">Truly native — end user is air-gapped, no webview or browser runtime</text>
+
+<rect x="20" y="136" width="1104" height="34" fill="#fff"/>
+<text x="36" y="158" fill="#0f172a">Reconstruction backbone</text>
+<text x="300" y="158" fill="#1e40af" font-weight="600">MapAnything (Apache-2.0)</text>
+<text x="610" y="158" fill="#475569">Only feed-forward model that regresses metric geometry and accepts GPS conditioning</text>
+
+<rect x="20" y="170" width="1104" height="34" fill="#f8fafc"/>
+<text x="36" y="192" fill="#0f172a">Deep-learning runtime</text>
+<text x="300" y="192" fill="#1e40af" font-weight="600">PyTorch (CUDA / MPS / CPU)</text>
+<text x="610" y="192" fill="#475569">Same code path on workstation, field laptop, or no GPU at all</text>
+
+<rect x="20" y="204" width="1104" height="34" fill="#fff"/>
+<text x="36" y="226" fill="#0f172a">Feature correspondence</text>
+<text x="300" y="226" fill="#1e40af" font-weight="600">OpenCV SIFT + RANSAC</text>
+<text x="610" y="226" fill="#475569">Scale-invariant — essential when altitude varies across a flight</text>
+
+<rect x="20" y="238" width="1104" height="34" fill="#f8fafc"/>
+<text x="36" y="260" fill="#0f172a">Bundle adjustment</text>
+<text x="300" y="260" fill="#1e40af" font-weight="600">scipy sparse Levenberg–Marquardt</text>
+<text x="610" y="260" fill="#475569">Avoids GTSAM/Ceres/g2o — keeps a single offline installer viable</text>
+
+<rect x="20" y="272" width="1104" height="34" fill="#fef3c7"/>
+<text x="36" y="294" fill="#0f172a" font-weight="700">Uncertainty estimation</text>
+<text x="300" y="294" fill="#92400e" font-weight="700">Schur-complement covariance</text>
+<text x="610" y="294" fill="#78350f" font-weight="600">Per-point 3×3 covariance falls out of BA nearly free — powers the trust layer</text>
+
+<rect x="20" y="306" width="1104" height="34" fill="#fff"/>
+<text x="36" y="328" fill="#0f172a">Surface reconstruction</text>
+<text x="300" y="328" fill="#1e40af" font-weight="600">Confidence-weighted TSDF</text>
+<text x="610" y="328" fill="#475569">Low-confidence observations contribute less — trust propagates into the mesh</text>
+
+<rect x="20" y="340" width="1104" height="34" fill="#f8fafc"/>
+<text x="36" y="362" fill="#0f172a">Video decoding</text>
+<text x="300" y="362" fill="#1e40af" font-weight="600">PyAV (FFmpeg)</text>
+<text x="610" y="362" fill="#475569">Reliable on long 4K files and variable frame rate, unlike naive frame capture</text>
+
+<rect x="20" y="374" width="1104" height="34" fill="#fff"/>
+<text x="36" y="396" fill="#0f172a">Geospatial</text>
+<text x="300" y="396" fill="#1e40af" font-weight="600">pyproj · laspy · GDAL</text>
+<text x="610" y="396" fill="#475569">Standard CRS handling, LAS extra-bytes for the confidence channel, GeoTIFF output</text>
+
+<rect x="20" y="408" width="1104" height="34" fill="#f8fafc"/>
+<text x="36" y="430" fill="#0f172a">Packaging</text>
+<text x="300" y="430" fill="#1e40af" font-weight="600">PyInstaller, offline installer</text>
+<text x="610" y="430" fill="#475569">Installs on a machine that has never seen a network — no runtime downloads</text>
+</g>
+
+<rect x="20" y="456" width="356" height="130" rx="8" fill="#eff6ff" stroke="#2563eb" stroke-width="1.5"/>
+<text x="40" y="482" font-size="14" font-weight="700" fill="#1e3a8a">Swappable backbone</text>
+<text x="40" y="506" font-size="12.5" fill="#1e40af">The reconstruction model sits behind an interface.</text>
+<text x="40" y="525" font-size="12.5" fill="#1e40af">MapAnything, VGGT or π³ can each be used without</text>
+<text x="40" y="544" font-size="12.5" fill="#1e40af">altering the pipeline — protecting against licence</text>
+<text x="40" y="563" font-size="12.5" fill="#1e40af">changes, VRAM limits, or a better model appearing.</text>
+
+<rect x="394" y="456" width="356" height="130" rx="8" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.5"/>
+<text x="414" y="482" font-size="14" font-weight="700" fill="#14532d">No model training required</text>
+<text x="414" y="506" font-size="12.5" fill="#166534">Pretrained inference only. This is what makes the</text>
+<text x="414" y="525" font-size="12.5" fill="#166534">system buildable and reproducible — no dataset</text>
+<text x="414" y="544" font-size="12.5" fill="#166534">collection, no training budget, no GPU cluster,</text>
+<text x="414" y="563" font-size="12.5" fill="#166534">and deterministic behaviour in the field.</text>
+
+<rect x="768" y="456" width="356" height="130" rx="8" fill="#fffbeb" stroke="#d97706" stroke-width="1.5"/>
+<text x="788" y="482" font-size="14" font-weight="700" fill="#78350f">Bounded memory by design</text>
+<text x="788" y="506" font-size="12.5" fill="#92400e">Reconstruction runs in overlapping windows, so</text>
+<text x="788" y="525" font-size="12.5" fill="#92400e">peak memory is set by window size, not video</text>
+<text x="788" y="544" font-size="12.5" fill="#92400e">length. A 30-minute flight costs the same as a</text>
+<text x="788" y="563" font-size="12.5" fill="#92400e">5-minute one — this is the scalability answer.</text>
+</svg>

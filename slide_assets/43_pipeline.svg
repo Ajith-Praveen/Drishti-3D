@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 600" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+<defs>
+<marker id="a43" markerWidth="9" markerHeight="9" refX="7" refY="3.2" orient="auto"><path d="M0,0 L7,3.2 L0,6.4 z" fill="#475569"/></marker>
+<linearGradient id="g1" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#0369a1"/><stop offset="100%" stop-color="#0284c7"/></linearGradient>
+<linearGradient id="g2" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#1d4ed8"/><stop offset="100%" stop-color="#3b82f6"/></linearGradient>
+<linearGradient id="g3" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#b45309"/><stop offset="100%" stop-color="#f59e0b"/></linearGradient>
+<linearGradient id="g4" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#14532d"/><stop offset="100%" stop-color="#16a34a"/></linearGradient>
+</defs>
+<rect x="0" y="0" width="800" height="600" fill="#f8fafc"/>
+
+<!-- INPUT row -->
+<g>
+<rect x="30" y="24" width="150" height="58" rx="8" fill="#fff" stroke="#0284c7" stroke-width="2"/>
+<text x="105" y="48" font-size="24" text-anchor="middle">🎬</text>
+<text x="105" y="70" font-size="14" font-weight="600" fill="#0c4a6e" text-anchor="middle">Video</text>
+
+<rect x="200" y="24" width="150" height="58" rx="8" fill="#fff" stroke="#0284c7" stroke-width="2"/>
+<text x="275" y="48" font-size="24" text-anchor="middle">🛰</text>
+<text x="275" y="70" font-size="14" font-weight="600" fill="#0c4a6e" text-anchor="middle">GPS</text>
+
+<rect x="370" y="24" width="150" height="58" rx="8" fill="#fff" stroke="#0284c7" stroke-width="2"/>
+<text x="445" y="48" font-size="24" text-anchor="middle">🧭</text>
+<text x="445" y="70" font-size="14" font-weight="600" fill="#0c4a6e" text-anchor="middle">Flight log</text>
+
+<rect x="540" y="24" width="150" height="58" rx="8" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1.6" stroke-dasharray="5 3"/>
+<text x="615" y="48" font-size="24" text-anchor="middle">📡</text>
+<text x="615" y="70" font-size="13" fill="#64748b" text-anchor="middle">RTK · IMU  (opt.)</text>
+</g>
+
+<line x1="360" y1="88" x2="360" y2="112" stroke="#475569" stroke-width="2" marker-end="url(#a43)"/>
+
+<!-- STAGE 1 -->
+<rect x="60" y="118" width="620" height="62" rx="9" fill="url(#g1)"/>
+<text x="92" y="145" font-size="26" fill="#fff">①</text>
+<text x="128" y="146" font-size="19" font-weight="700" fill="#fff">SELECT</text>
+<text x="128" y="167" font-size="14" fill="#bae6fd">18,000 frames → a few hundred keyframes</text>
+<rect x="470" y="132" width="190" height="34" rx="6" fill="#0c4a6e"/>
+<text x="565" y="154" font-size="13.5" fill="#7dd3fc" text-anchor="middle">baseline in metres · blur-free</text>
+
+<line x1="360" y1="186" x2="360" y2="206" stroke="#475569" stroke-width="2" marker-end="url(#a43)"/>
+
+<!-- STAGE 2 -->
+<rect x="60" y="212" width="620" height="62" rx="9" fill="url(#g2)"/>
+<text x="92" y="239" font-size="26" fill="#fff">②</text>
+<text x="128" y="240" font-size="19" font-weight="700" fill="#fff">RECONSTRUCT</text>
+<text x="128" y="261" font-size="14" fill="#bfdbfe">pose-free model → poses + dense geometry</text>
+<rect x="470" y="226" width="190" height="34" rx="6" fill="#1e3a8a"/>
+<text x="565" y="248" font-size="13.5" fill="#93c5fd" text-anchor="middle">works where SfM cannot</text>
+
+<line x1="360" y1="280" x2="360" y2="300" stroke="#475569" stroke-width="2" marker-end="url(#a43)"/>
+
+<!-- STAGE 3 -->
+<rect x="60" y="306" width="620" height="62" rx="9" fill="#1e293b"/>
+<text x="92" y="333" font-size="26" fill="#fff">③</text>
+<text x="128" y="334" font-size="19" font-weight="700" fill="#fff">REFINE</text>
+<text x="128" y="355" font-size="14" fill="#cbd5e1">bundle adjustment · GPS + gravity priors</text>
+<rect x="470" y="320" width="190" height="34" rx="6" fill="#0f172a"/>
+<text x="565" y="342" font-size="13.5" fill="#94a3b8" text-anchor="middle">metric scale · levelled</text>
+
+<line x1="360" y1="374" x2="360" y2="394" stroke="#475569" stroke-width="2" marker-end="url(#a43)"/>
+
+<!-- STAGE 4 - NOVELTY -->
+<rect x="60" y="400" width="620" height="70" rx="9" fill="url(#g3)" stroke="#78350f" stroke-width="2.5"/>
+<text x="92" y="430" font-size="26" fill="#fff">④</text>
+<text x="128" y="430" font-size="19" font-weight="700" fill="#fff">QUANTIFY</text>
+<text x="128" y="452" font-size="14" fill="#fef3c7">covariance → uncertainty per point</text>
+<g>
+<rect x="470" y="414" width="60" height="42" rx="6" fill="#16a34a"/>
+<text x="500" y="440" font-size="12.5" font-weight="700" fill="#fff" text-anchor="middle">MEASURED</text>
+<rect x="536" y="414" width="58" height="42" rx="6" fill="#f59e0b" stroke="#fff" stroke-width="1.5"/>
+<text x="565" y="434" font-size="12.5" font-weight="700" fill="#fff" text-anchor="middle">LOW</text>
+<text x="565" y="449" font-size="11" fill="#fff" text-anchor="middle">CONF</text>
+<rect x="600" y="414" width="60" height="42" rx="6" fill="#dc2626"/>
+<text x="630" y="440" font-size="12.5" font-weight="700" fill="#fff" text-anchor="middle">INFERRED</text>
+</g>
+<text x="700" y="438" font-size="13" font-weight="700" fill="#78350f">★ ours</text>
+
+<line x1="360" y1="476" x2="360" y2="496" stroke="#475569" stroke-width="2" marker-end="url(#a43)"/>
+
+<!-- OUTPUT -->
+<rect x="60" y="502" width="620" height="76" rx="9" fill="url(#g4)"/>
+<text x="92" y="532" font-size="26" fill="#fff">⑤</text>
+<text x="128" y="532" font-size="19" font-weight="700" fill="#fff">DELIVER</text>
+<g font-size="13" fill="#dcfce7">
+<text x="128" y="554">Mesh</text><text x="196" y="554">Point cloud</text><text x="300" y="554">DSM</text><text x="366" y="554">Orthomosaic</text>
+<text x="128" y="572">Accuracy report</text><text x="264" y="572">Refly plan</text>
+</g>
+<rect x="500" y="516" width="160" height="48" rx="6" fill="#052e16"/>
+<text x="580" y="536" font-size="13" fill="#86efac" text-anchor="middle">OBJ · PLY · GLB</text>
+<text x="580" y="554" font-size="13" fill="#86efac" text-anchor="middle">LAS · GeoTIFF</text>
+
+<!-- side annotation -->
+<text x="700" y="150" font-size="12.5" fill="#64748b" writing-mode="tb" transform="rotate(0)"></text>
+<g font-size="12.5" fill="#94a3b8">
+<text x="694" y="152">seconds</text>
+<text x="694" y="246">minutes</text>
+<text x="694" y="340">minutes</text>
+<text x="694" y="460">seconds</text>
+</g>
+</svg>

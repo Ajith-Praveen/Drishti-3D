@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 600" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+<defs>
+<linearGradient id="sk" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#dbeafe"/><stop offset="100%" stop-color="#f8fafc"/></linearGradient>
+<linearGradient id="gr" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#d9cfc0"/><stop offset="100%" stop-color="#b9a68e"/></linearGradient>
+<linearGradient id="fr" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#2563eb" stop-opacity="0.34"/><stop offset="100%" stop-color="#2563eb" stop-opacity="0.05"/></linearGradient>
+<linearGradient id="rf" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#4ade80"/><stop offset="100%" stop-color="#15803d"/></linearGradient>
+<linearGradient id="wl" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#ef4444"/><stop offset="100%" stop-color="#991b1b"/></linearGradient>
+<marker id="d4" markerWidth="7" markerHeight="7" refX="3.5" refY="3.5" orient="auto"><path d="M0,3.5 L7,1 L7,6 z" fill="#0f172a"/></marker>
+<filter id="sh"><feDropShadow dx="0" dy="2" stdDeviation="2" flood-color="#0f172a" flood-opacity="0.28"/></filter>
+</defs>
+
+<rect x="0" y="0" width="800" height="600" fill="url(#sk)"/>
+
+<!-- altitude -->
+<line x1="46" y1="90" x2="46" y2="380" stroke="#0f172a" stroke-width="1.4" marker-start="url(#d4)" marker-end="url(#d4)"/>
+<text x="38" y="230" font-size="17" font-weight="700" fill="#0f172a" text-anchor="end">120 m</text>
+
+<!-- flight line -->
+<line x1="90" y1="90" x2="770" y2="90" stroke="#1d4ed8" stroke-width="2.4" stroke-dasharray="11 6"/>
+
+<!-- frustums -->
+<g>
+<path d="M200,96 L60,380 L370,380 z" fill="url(#fr)" stroke="#2563eb" stroke-opacity="0.5"/>
+<path d="M300,96 L160,380 L470,380 z" fill="url(#fr)" stroke="#2563eb" stroke-opacity="0.5"/>
+<path d="M400,96 L260,380 L570,380 z" fill="url(#fr)" stroke="#2563eb" stroke-opacity="0.5"/>
+<path d="M500,96 L360,380 L670,380 z" fill="url(#fr)" stroke="#2563eb" stroke-opacity="0.5"/>
+<path d="M600,96 L460,380 L770,380 z" fill="url(#fr)" stroke="#2563eb" stroke-opacity="0.5"/>
+</g>
+
+<!-- drones -->
+<g filter="url(#sh)">
+<g id="dr" transform="translate(200,90)">
+<ellipse cx="-30" cy="-9" rx="17" ry="3" fill="#94a3b8"/><ellipse cx="30" cy="-9" rx="17" ry="3" fill="#94a3b8"/>
+<line x1="-25" y1="-7" x2="-9" y2="0" stroke="#334155" stroke-width="3"/><line x1="25" y1="-7" x2="9" y2="0" stroke="#334155" stroke-width="3"/>
+<rect x="-13" y="-5" width="26" height="10" rx="3" fill="#1e293b"/>
+<rect x="-4" y="5" width="8" height="7" rx="2" fill="#0f172a"/>
+<circle cx="0" cy="11" r="2.8" fill="#38bdf8"/>
+</g>
+<use href="#dr" x="100"/><use href="#dr" x="200"/><use href="#dr" x="300"/><use href="#dr" x="400"/>
+</g>
+
+<!-- baseline dim -->
+<line x1="200" y1="56" x2="300" y2="56" stroke="#0f172a" stroke-width="1.4" marker-start="url(#d4)" marker-end="url(#d4)"/>
+<text x="250" y="46" font-size="16" font-weight="700" fill="#0f172a" text-anchor="middle">7.7 m</text>
+
+<!-- ground -->
+<rect x="0" y="380" width="800" height="90" fill="url(#gr)"/>
+<line x1="0" y1="380" x2="800" y2="380" stroke="#8a7a66" stroke-width="2"/>
+<path d="M0,410 Q300,400 800,414" stroke="#78716c" stroke-width="9" fill="none" opacity="0.8"/>
+
+<!-- buildings -->
+<g>
+<path d="M180,380 L180,332 L246,318 L246,366 z" fill="#b0aaa2"/>
+<path d="M246,366 L246,318 L308,332 L308,380 z" fill="url(#wl)"/>
+<path d="M180,332 L246,318 L308,332 L242,346 z" fill="url(#rf)"/>
+
+<path d="M470,380 L470,340 L524,328 L524,368 z" fill="#b0aaa2"/>
+<path d="M524,368 L524,328 L582,340 L582,380 z" fill="url(#wl)"/>
+<path d="M470,340 L524,328 L582,340 L528,352 z" fill="url(#rf)"/>
+</g>
+<g fill="#4d7c0f"><circle cx="380" cy="368" r="13"/><circle cx="398" cy="374" r="9"/><circle cx="670" cy="370" r="12"/></g>
+
+<!-- footprint dim -->
+<line x1="260" y1="440" x2="570" y2="440" stroke="#0f172a" stroke-width="1.4" marker-start="url(#d4)" marker-end="url(#d4)"/>
+<text x="415" y="462" font-size="16" font-weight="700" fill="#0f172a" text-anchor="middle">216 m footprint</text>
+
+<!-- legend -->
+<rect x="596" y="300" width="192" height="70" rx="6" fill="#fff" fill-opacity="0.95" stroke="#cbd5e1"/>
+<rect x="608" y="312" width="16" height="12" rx="2" fill="url(#rf)"/><text x="632" y="323" font-size="13" fill="#14532d">seen</text>
+<rect x="608" y="332" width="16" height="12" rx="2" fill="url(#wl)"/><text x="632" y="343" font-size="13" fill="#7f1d1d">never seen</text>
+<rect x="608" y="352" width="16" height="12" rx="2" fill="#2563eb" fill-opacity="0.32"/><text x="632" y="363" font-size="13" fill="#1e3a8a">field of view</text>
+
+<!-- three big numbers -->
+<rect x="20" y="486" width="246" height="96" rx="8" fill="#eff6ff" stroke="#2563eb" stroke-width="2"/>
+<text x="143" y="524" font-size="34" font-weight="700" fill="#1d4ed8" text-anchor="middle">93.7%</text>
+<text x="143" y="548" font-size="15" font-weight="600" fill="#1e3a8a" text-anchor="middle">frame overlap</text>
+<text x="143" y="568" font-size="13" fill="#64748b" text-anchor="middle">survey standard is 80%</text>
+
+<rect x="278" y="486" width="246" height="96" rx="8" fill="#fef2f2" stroke="#dc2626" stroke-width="2"/>
+<text x="401" y="524" font-size="34" font-weight="700" fill="#b91c1c" text-anchor="middle">3.7°</text>
+<text x="401" y="548" font-size="15" font-weight="600" fill="#7f1d1d" text-anchor="middle">triangulation angle</text>
+<text x="401" y="568" font-size="13" fill="#64748b" text-anchor="middle">B/H = 0.064</text>
+
+<rect x="536" y="486" width="246" height="96" rx="8" fill="#fffbeb" stroke="#d97706" stroke-width="2"/>
+<text x="659" y="524" font-size="34" font-weight="700" fill="#b45309" text-anchor="middle">1 side</text>
+<text x="659" y="548" font-size="15" font-weight="600" fill="#78350f" text-anchor="middle">of every structure</text>
+<text x="659" y="568" font-size="13" fill="#64748b" text-anchor="middle">far walls unrecoverable</text>
+</svg>

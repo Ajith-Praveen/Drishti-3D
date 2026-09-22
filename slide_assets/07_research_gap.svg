@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 620" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+<defs><marker id="mg" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 z" fill="#0f172a"/></marker></defs>
+<text x="20" y="30" font-size="23" font-weight="700" fill="#0f172a">The Research Gap</text>
+<text x="20" y="54" font-size="15" fill="#475569">Two mature research lines exist. Neither solves this problem alone. Nobody has joined them.</text>
+
+<!-- line A -->
+<rect x="20" y="76" width="520" height="210" rx="8" fill="#eff6ff" stroke="#2563eb" stroke-width="1.6"/>
+<text x="44" y="104" font-size="16" font-weight="700" fill="#1e3a8a">Line A · Classical Photogrammetry</text>
+<text x="44" y="126" font-size="12.5" fill="#475569">COLMAP · Pix4D · Metashape · OpenDroneMap</text>
+<text x="44" y="156" font-size="13" font-weight="600" fill="#14532d">Strength</text>
+<text x="44" y="176" font-size="12.5" fill="#334155">Metric. Georeferenced. Survey-grade accuracy</text>
+<text x="44" y="194" font-size="12.5" fill="#334155">through bundle adjustment.</text>
+<text x="44" y="222" font-size="13" font-weight="600" fill="#7f1d1d">Breaks when</text>
+<text x="44" y="242" font-size="12.5" fill="#334155">Cameras lie on one line. Requires 70–80%</text>
+<text x="44" y="260" font-size="12.5" fill="#334155">overlap across crossing passes to converge.</text>
+<text x="44" y="278" font-size="11.5" font-style="italic" fill="#64748b">arXiv:2507.14798 — aerial block evaluation</text>
+
+<!-- line B -->
+<rect x="604" y="76" width="520" height="210" rx="8" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.6"/>
+<text x="628" y="104" font-size="16" font-weight="700" fill="#14532d">Line B · Feed-Forward Reconstruction</text>
+<text x="628" y="126" font-size="12.5" fill="#475569">DUSt3R · MASt3R · VGGT · π³ · MapAnything</text>
+<text x="628" y="156" font-size="13" font-weight="600" fill="#14532d">Strength</text>
+<text x="628" y="176" font-size="12.5" fill="#334155">Reconstructs from unposed frames. Robust</text>
+<text x="628" y="194" font-size="12.5" fill="#334155">exactly where classical SfM fails to converge.</text>
+<text x="628" y="222" font-size="13" font-weight="600" fill="#7f1d1d">Breaks when</text>
+<text x="628" y="242" font-size="12.5" fill="#334155">Output is scale-free and not georeferenced.</text>
+<text x="628" y="260" font-size="12.5" fill="#334155">Drifts over long sequences. Not survey-usable.</text>
+<text x="628" y="278" font-size="11.5" font-style="italic" fill="#64748b">arXiv:2605.17942 (UAVFF3D) · arXiv:2608.06404</text>
+
+<line x1="540" y1="180" x2="598" y2="180" stroke="#0f172a" stroke-width="2" marker-end="url(#mg)"/>
+<line x1="604" y1="180" x2="546" y2="180" stroke="#0f172a" stroke-width="2" marker-end="url(#mg)"/>
+
+<!-- synthesis -->
+<path d="M280,286 L280,312 L620,312 L620,338" fill="none" stroke="#0f172a" stroke-width="2"/>
+<path d="M864,286 L864,312" fill="none" stroke="#0f172a" stroke-width="2"/>
+<line x1="620" y1="330" x2="620" y2="342" stroke="#0f172a" stroke-width="2" marker-end="url(#mg)"/>
+
+<rect x="200" y="348" width="840" height="72" rx="8" fill="#1e293b"/>
+<text x="620" y="376" font-size="17" font-weight="700" fill="#fbbf24" text-anchor="middle">OUR APPROACH — use each where it is strong</text>
+<text x="620" y="400" font-size="13.5" fill="#e2e8f0" text-anchor="middle">Feed-forward for <tspan font-weight="700" fill="#fff">initialisation</tspan> · Bundle adjustment with GPS and gravity priors for <tspan font-weight="700" fill="#fff">accuracy</tspan></text>
+
+<!-- second gap -->
+<rect x="20" y="440" width="544" height="164" rx="8" fill="#fffbeb" stroke="#d97706" stroke-width="1.8"/>
+<text x="44" y="468" font-size="15.5" font-weight="700" fill="#78350f">The second, unaddressed gap</text>
+<text x="44" y="492" font-size="12.5" fill="#78350f">Per-point covariance from bundle adjustment has been</text>
+<text x="44" y="510" font-size="12.5" fill="#78350f">computed since ~2018. Next-best-view planning from</text>
+<text x="44" y="528" font-size="12.5" fill="#78350f">uncertainty dates to 2012. <tspan font-weight="700">Those two lines diverged.</tspan></text>
+<text x="44" y="556" font-size="12.5" fill="#78350f">Neither has been applied to the single-pass degenerate</text>
+<text x="44" y="574" font-size="12.5" fill="#78350f">case — precisely where uncertainty is largest, most</text>
+<text x="44" y="592" font-size="12.5" fill="#78350f">anisotropic, and most consequential for a decision.</text>
+
+<rect x="596" y="440" width="528" height="164" rx="8" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="620" y="468" font-size="15.5" font-weight="700" fill="#0f172a">Our research gap statement</text>
+<text x="620" y="494" font-size="12.5" fill="#334155">"Photogrammetry pipelines require 70–80% overlap across</text>
+<text x="620" y="512" font-size="12.5" fill="#334155">multiple passes and fail on single strips due to weak baseline</text>
+<text x="620" y="530" font-size="12.5" fill="#334155">geometry. Pose-free feed-forward models reconstruct from</text>
+<text x="620" y="548" font-size="12.5" fill="#334155">unposed frames but produce scale-free, non-georeferenced</text>
+<text x="620" y="566" font-size="12.5" fill="#334155">output. No system combines the two with per-vertex</text>
+<text x="620" y="584" font-size="12.5" fill="#334155">confidence reporting, and none ships offline for field use."</text>
+</svg>

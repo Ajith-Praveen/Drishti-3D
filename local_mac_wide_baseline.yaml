@@ -1,0 +1,46 @@
+# Wide-baseline run: recover BUILDING HEIGHT, not just a textured plane.
+#
+# The 956px "accurate" run produced buildings only 0.17 m above terrain --
+# i.e. no buildings at all, geometrically. Cause: quality_profile "accurate"
+# sets baseline_to_altitude_ratio = 0.06, giving a 6.75 m baseline at 119.6 m
+# AGL -> B/H = 0.056, about 4x narrower than the 0.2-0.3 that aerial
+# photogrammetry needs. Depth error scales as 1/baseline, so at that ratio a
+# 3-4 m building sits inside the depth noise.
+#
+# That 0.06 was chosen (see TriageConfig's sweep table) to maximise surface
+# CONTINUITY, explicitly trading depth precision away. For recovering
+# structure that is the wrong trade.
+#
+# This config keeps 956 px but widens the baseline to B/H = 0.20.
+quality_profile: balanced
+
+triage:
+  baseline_to_altitude_ratio: 0.20
+  min_baseline_m: 8.0
+
+geometry:
+  backbone: mapanything
+  max_image_size: 956
+  window_size: 8
+  max_devices: 1
+  prefetch_frames: true
+
+semantics:
+  enabled: true
+  model: segformer
+  checkpoint: nvidia/segformer-b4-finetuned-ade-512-512
+  max_image_size: 956
+  batch_size: 2
+  remove_dynamic: true
+  min_vote_ratio: 0.6
+  min_views: 2
+
+texture:
+  enabled: true
+  texture_size: 4096
+  blend_views: 4
+  max_views: 60
+
+fusion:
+  voxel_count_budget: 2000000
+  pre_tsdf_max_points: 1500000

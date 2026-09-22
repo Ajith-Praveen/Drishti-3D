@@ -1,0 +1,108 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 560" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+<defs><marker id="mu" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#94a3b8"/></marker></defs>
+<text x="20" y="30" font-size="23" font-weight="700" fill="#0f172a">Operator Workflow — Native Desktop Application</text>
+<text x="20" y="54" font-size="15" fill="#475569">Four screens. Drag in a video, get a measurable model. No internet at any point.</text>
+
+<!-- 1 ingest -->
+<rect x="20" y="76" width="264" height="200" rx="8" fill="#1e293b"/>
+<rect x="20" y="76" width="264" height="26" rx="8" fill="#334155"/>
+<text x="34" y="94" font-size="12" font-weight="700" fill="#fbbf24">1 · INGEST</text>
+<rect x="38" y="118" width="228" height="52" rx="5" fill="none" stroke="#64748b" stroke-dasharray="5 3"/>
+<text x="152" y="140" font-size="12" fill="#cbd5e1" text-anchor="middle">Drop video here</text>
+<text x="152" y="158" font-size="10.5" fill="#94a3b8" text-anchor="middle">DJI_0753.MP4</text>
+<g font-size="10.5" fill="#cbd5e1">
+<text x="38" y="192">Resolution</text><text x="266" y="192" text-anchor="end" fill="#fff">3840×2160</text>
+<text x="38" y="211">Duration</text><text x="266" y="211" text-anchor="end" fill="#fff">242 s · 7255 fr</text>
+<text x="38" y="230">Telemetry</text><text x="266" y="230" text-anchor="end" fill="#4ade80">3390 samples</text>
+<text x="38" y="249">Time offset</text><text x="266" y="249" text-anchor="end" fill="#4ade80">42.9 s auto</text>
+</g>
+<rect x="38" y="256" width="228" height="0" fill="none"/>
+
+<!-- 2 process -->
+<rect x="312" y="76" width="264" height="200" rx="8" fill="#1e293b"/>
+<rect x="312" y="76" width="264" height="26" rx="8" fill="#334155"/>
+<text x="326" y="94" font-size="12" font-weight="700" fill="#fbbf24">2 · PROCESS</text>
+<g font-size="10.5">
+<text x="330" y="124" fill="#cbd5e1">Ingest</text><text x="562" y="124" text-anchor="end" fill="#4ade80">done</text>
+<rect x="330" y="130" width="232" height="4" rx="2" fill="#4ade80"/>
+<text x="330" y="154" fill="#cbd5e1">Triage</text><text x="562" y="154" text-anchor="end" fill="#4ade80">60 keyframes</text>
+<rect x="330" y="160" width="232" height="4" rx="2" fill="#4ade80"/>
+<text x="330" y="184" fill="#cbd5e1">Geometry</text><text x="562" y="184" text-anchor="end" fill="#fbbf24">running…</text>
+<rect x="330" y="190" width="232" height="4" rx="2" fill="#334155"/>
+<rect x="330" y="190" width="150" height="4" rx="2" fill="#fbbf24"/>
+<text x="330" y="214" fill="#64748b">Bundle adjustment</text>
+<text x="330" y="234" fill="#64748b">Fusion</text>
+<text x="330" y="254" fill="#64748b">Export</text>
+</g>
+
+<!-- 3 workspace -->
+<rect x="604" y="76" width="264" height="200" rx="8" fill="#1e293b"/>
+<rect x="604" y="76" width="264" height="26" rx="8" fill="#334155"/>
+<text x="618" y="94" font-size="12" font-weight="700" fill="#fbbf24">3 · WORKSPACE</text>
+<rect x="618" y="112" width="236" height="118" rx="4" fill="#0f172a"/>
+<g opacity="0.95">
+<path d="M640,220 L720,196 L806,202 L840,222 z" fill="#16a34a"/>
+<path d="M700,196 L718,168 L760,164 L772,192 z" fill="#16a34a"/>
+<path d="M772,192 L760,164 L800,170 L812,198 z" fill="#dc2626"/>
+<path d="M652,214 L668,190 L700,196 L688,216 z" fill="#f59e0b"/>
+</g>
+<g font-size="9.5">
+<rect x="626" y="238" width="10" height="10" fill="#16a34a"/><text x="642" y="247" fill="#cbd5e1">Measured</text>
+<rect x="712" y="238" width="10" height="10" fill="#f59e0b"/><text x="728" y="247" fill="#cbd5e1">Low conf</text>
+<rect x="790" y="238" width="10" height="10" fill="#dc2626"/><text x="806" y="247" fill="#cbd5e1">Inferred</text>
+</g>
+<text x="618" y="266" font-size="10.5" fill="#94a3b8">Measure · rotate · section · export</text>
+
+<!-- 4 report -->
+<rect x="896" y="76" width="228" height="200" rx="8" fill="#1e293b"/>
+<rect x="896" y="76" width="228" height="26" rx="8" fill="#334155"/>
+<text x="910" y="94" font-size="12" font-weight="700" fill="#fbbf24">4 · REPORT</text>
+<g font-size="10.5" fill="#cbd5e1">
+<text x="910" y="124">Relative accuracy</text>
+<text x="910" y="144">Absolute accuracy</text>
+<text x="910" y="164">Scale error</text>
+<text x="910" y="184">Reprojection RMSE</text>
+<text x="910" y="204">Coverage</text>
+<text x="910" y="224">Confidence split</text>
+</g>
+<rect x="910" y="234" width="200" height="32" rx="4" fill="#422006"/>
+<text x="1010" y="248" font-size="9.5" fill="#fbbf24" text-anchor="middle">Values never fabricated —</text>
+<text x="1010" y="260" font-size="9.5" fill="#fbbf24" text-anchor="middle">unmeasured fields read "not computed"</text>
+
+<g stroke="#94a3b8" stroke-width="1.6">
+<line x1="284" y1="176" x2="306" y2="176" marker-end="url(#mu)"/>
+<line x1="576" y1="176" x2="598" y2="176" marker-end="url(#mu)"/>
+<line x1="868" y1="176" x2="890" y2="176" marker-end="url(#mu)"/>
+</g>
+
+<!-- features -->
+<text x="20" y="308" font-size="16" font-weight="700" fill="#0f172a">Why native desktop, not a web app</text>
+<rect x="20" y="320" width="356" height="96" rx="8" fill="#fef2f2" stroke="#dc2626" stroke-width="1.5"/>
+<text x="40" y="344" font-size="13.5" font-weight="700" fill="#7f1d1d">The end user is air-gapped</text>
+<text x="40" y="366" font-size="12.5" fill="#991b1b">NTRO footage cannot leave the machine.</text>
+<text x="40" y="385" font-size="12.5" fill="#991b1b">A cloud pipeline is disqualified on principle,</text>
+<text x="40" y="404" font-size="12.5" fill="#991b1b">not on performance.</text>
+
+<rect x="394" y="320" width="356" height="96" rx="8" fill="#fffbeb" stroke="#d97706" stroke-width="1.5"/>
+<text x="414" y="344" font-size="13.5" font-weight="700" fill="#78350f">4K upload is not viable</text>
+<text x="414" y="366" font-size="12.5" fill="#92400e">A 3 GB video over field connectivity is</text>
+<text x="414" y="385" font-size="12.5" fill="#92400e">hours of transfer before processing even</text>
+<text x="414" y="404" font-size="12.5" fill="#92400e">begins. Local compute is the only path.</text>
+
+<rect x="768" y="320" width="356" height="96" rx="8" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.5"/>
+<text x="788" y="344" font-size="13.5" font-weight="700" fill="#14532d">Single offline installer</text>
+<text x="788" y="366" font-size="12.5" fill="#166534">No runtime model download, no licence</text>
+<text x="788" y="385" font-size="12.5" fill="#166534">server, no telemetry call. Deployable to</text>
+<text x="788" y="404" font-size="12.5" fill="#166534">a machine that has never seen a network.</text>
+
+<rect x="20" y="432" width="1104" height="112" rx="8" fill="#f8fafc" stroke="#cbd5e1"/>
+<text x="40" y="456" font-size="14" font-weight="700" fill="#0f172a">BUILT-IN OPERATIONAL SAFEGUARDS</text>
+<g font-size="12.5" fill="#334155">
+<text x="40" y="480">Completed runs cache to disk and reload instantly — a demo survives a failed GPU</text>
+<text x="620" y="480">Cancellable mid-run, with progress per stage</text>
+<text x="40" y="502">Measurement tools refuse to measure inferred geometry by default</text>
+<text x="620" y="502">CPU fallback when no GPU is present</text>
+<text x="40" y="524">Every export carries the confidence channel, so trust survives the handoff</text>
+<text x="620" y="524">Backbone is swappable — no single-model lock-in</text>
+</g>
+</svg>

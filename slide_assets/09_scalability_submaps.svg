@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 540" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+<defs><marker id="m9" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#475569"/></marker></defs>
+<text x="20" y="30" font-size="23" font-weight="700" fill="#0f172a">Scalability — Submap Windowing</text>
+<text x="20" y="54" font-size="15" fill="#475569">Peak memory is constant in video length, not linear. A 30-minute flight costs the same as a 5-minute one.</text>
+
+<!-- keyframe strip -->
+<text x="20" y="90" font-size="13.5" font-weight="700" fill="#0f172a">Keyframes from one flight</text>
+<g>
+<rect x="20" y="100" width="1104" height="26" rx="4" fill="#e2e8f0"/>
+<g fill="#64748b">
+<circle cx="60" cy="113" r="5"/><circle cx="120" cy="113" r="5"/><circle cx="180" cy="113" r="5"/><circle cx="240" cy="113" r="5"/>
+<circle cx="300" cy="113" r="5"/><circle cx="360" cy="113" r="5"/><circle cx="420" cy="113" r="5"/><circle cx="480" cy="113" r="5"/>
+<circle cx="540" cy="113" r="5"/><circle cx="600" cy="113" r="5"/><circle cx="660" cy="113" r="5"/><circle cx="720" cy="113" r="5"/>
+<circle cx="780" cy="113" r="5"/><circle cx="840" cy="113" r="5"/><circle cx="900" cy="113" r="5"/><circle cx="960" cy="113" r="5"/>
+<circle cx="1020" cy="113" r="5"/><circle cx="1080" cy="113" r="5"/>
+</g>
+</g>
+
+<!-- windows -->
+<text x="20" y="164" font-size="13.5" font-weight="700" fill="#0f172a">Processed in overlapping windows — only one window is in memory at a time</text>
+<g opacity="0.9">
+<rect x="40" y="176" width="300" height="34" rx="5" fill="#dbeafe" stroke="#2563eb" stroke-width="1.6"/>
+<text x="190" y="198" font-size="12.5" font-weight="600" fill="#1e3a8a" text-anchor="middle">Submap 1</text>
+<rect x="280" y="218" width="300" height="34" rx="5" fill="#dbeafe" stroke="#2563eb" stroke-width="1.6"/>
+<text x="430" y="240" font-size="12.5" font-weight="600" fill="#1e3a8a" text-anchor="middle">Submap 2</text>
+<rect x="520" y="260" width="300" height="34" rx="5" fill="#dbeafe" stroke="#2563eb" stroke-width="1.6"/>
+<text x="670" y="282" font-size="12.5" font-weight="600" fill="#1e3a8a" text-anchor="middle">Submap 3</text>
+<rect x="760" y="302" width="300" height="34" rx="5" fill="#dbeafe" stroke="#2563eb" stroke-width="1.6"/>
+<text x="910" y="324" font-size="12.5" font-weight="600" fill="#1e3a8a" text-anchor="middle">Submap 4</text>
+</g>
+<g fill="#d97706" opacity="0.3">
+<rect x="280" y="176" width="60" height="76"/><rect x="520" y="218" width="60" height="76"/><rect x="760" y="260" width="60" height="76"/>
+</g>
+<text x="310" y="171" font-size="11" font-weight="700" fill="#92400e" text-anchor="middle">overlap</text>
+
+<text x="1080" y="200" font-size="12.5" fill="#475569" text-anchor="end">Shared keyframes let consecutive submaps</text>
+<text x="1080" y="218" font-size="12.5" fill="#475569" text-anchor="end">be aligned into one consistent model</text>
+
+<!-- merge -->
+<line x1="620" y1="348" x2="620" y2="374" stroke="#475569" stroke-width="1.8" marker-end="url(#m9)"/>
+<rect x="340" y="380" width="560" height="46" rx="7" fill="#1e293b"/>
+<text x="620" y="399" font-size="13.5" font-weight="700" fill="#fff" text-anchor="middle">Merge via Umeyama similarity + RANSAC on shared cameras</text>
+<text x="620" y="418" font-size="12" fill="#cbd5e1" text-anchor="middle">Explicit degeneracy guard — near-collinear cameras are detected, not silently mis-aligned</text>
+
+<!-- benefits -->
+<rect x="20" y="444" width="356" height="82" rx="8" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.5"/>
+<text x="40" y="468" font-size="13.5" font-weight="700" fill="#14532d">Bounded memory</text>
+<text x="40" y="490" font-size="12.5" fill="#166534">Window size chosen for the available VRAM.</text>
+<text x="40" y="509" font-size="12.5" fill="#166534">Runs on a 6 GB laptop GPU, not just a workstation.</text>
+
+<rect x="394" y="444" width="356" height="82" rx="8" fill="#eff6ff" stroke="#2563eb" stroke-width="1.5"/>
+<text x="414" y="468" font-size="13.5" font-weight="700" fill="#1e3a8a">Progressive output</text>
+<text x="414" y="490" font-size="12.5" fill="#1e40af">Each completed submap renders immediately.</text>
+<text x="414" y="509" font-size="12.5" fill="#1e40af">Operator sees geometry while processing continues.</text>
+
+<rect x="768" y="444" width="356" height="82" rx="8" fill="#fffbeb" stroke="#d97706" stroke-width="1.5"/>
+<text x="788" y="468" font-size="13.5" font-weight="700" fill="#78350f">Drift controlled</text>
+<text x="788" y="490" font-size="12.5" fill="#92400e">Overlap cameras anchor each window to the last,</text>
+<text x="788" y="509" font-size="12.5" fill="#92400e">preventing scale and orientation drift along the strip.</text>
+</svg>

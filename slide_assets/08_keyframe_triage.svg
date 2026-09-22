@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 560" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+<text x="20" y="30" font-size="23" font-weight="700" fill="#0f172a">Video-Native Keyframe Triage</text>
+<text x="20" y="54" font-size="15" fill="#475569">7,255 frames in · only the frames that carry new geometry survive</text>
+
+<!-- naive -->
+<rect x="20" y="76" width="1104" height="134" rx="8" fill="#fef2f2" stroke="#dc2626" stroke-width="1.5"/>
+<text x="40" y="102" font-size="15" font-weight="700" fill="#7f1d1d">What everyone else does — every Nth frame</text>
+<g>
+<rect x="40" y="118" width="34" height="42" rx="3" fill="#dc2626"/>
+<rect x="82" y="118" width="34" height="42" rx="3" fill="#e5e7eb"/><rect x="124" y="118" width="34" height="42" rx="3" fill="#e5e7eb"/>
+<rect x="166" y="118" width="34" height="42" rx="3" fill="#dc2626"/>
+<rect x="208" y="118" width="34" height="42" rx="3" fill="#e5e7eb"/><rect x="250" y="118" width="34" height="42" rx="3" fill="#e5e7eb"/>
+<rect x="292" y="118" width="34" height="42" rx="3" fill="#dc2626"/>
+<rect x="334" y="118" width="34" height="42" rx="3" fill="#e5e7eb"/><rect x="376" y="118" width="34" height="42" rx="3" fill="#e5e7eb"/>
+<rect x="418" y="118" width="34" height="42" rx="3" fill="#dc2626"/>
+<rect x="460" y="118" width="34" height="42" rx="3" fill="#e5e7eb"/><rect x="502" y="118" width="34" height="42" rx="3" fill="#e5e7eb"/>
+<rect x="544" y="118" width="34" height="42" rx="3" fill="#dc2626"/>
+</g>
+<text x="600" y="134" font-size="12.5" fill="#7f1d1d">Blind to blur — a motion-blurred frame gets picked anyway</text>
+<text x="600" y="154" font-size="12.5" fill="#7f1d1d">Blind to speed — hovering wastes budget, fast transit starves</text>
+<text x="600" y="174" font-size="12.5" fill="#7f1d1d">Blind to altitude — same spacing at 40 m and 120 m AGL</text>
+<text x="40" y="184" font-size="12" fill="#991b1b">selected</text>
+<text x="40" y="200" font-size="12" fill="#6b7280">discarded</text>
+
+<!-- ours -->
+<rect x="20" y="224" width="1104" height="196" rx="8" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.5"/>
+<text x="40" y="250" font-size="15" font-weight="700" fill="#14532d">Ours — spacing driven by real metric baseline</text>
+
+<text x="40" y="278" font-size="13" font-weight="700" fill="#14532d">1 · GPS baseline accumulates in METRES</text>
+<line x1="40" y1="300" x2="1084" y2="300" stroke="#94a3b8" stroke-width="1.5"/>
+<g fill="#16a34a">
+<circle cx="60" cy="300" r="6"/><circle cx="150" cy="300" r="6"/><circle cx="240" cy="300" r="6"/>
+<circle cx="420" cy="300" r="6"/><circle cx="600" cy="300" r="6"/><circle cx="690" cy="300" r="6"/>
+<circle cx="780" cy="300" r="6"/><circle cx="960" cy="300" r="6"/>
+</g>
+<text x="105" y="292" font-size="10.5" fill="#166534" text-anchor="middle">slow</text>
+<text x="510" y="292" font-size="10.5" fill="#166534" text-anchor="middle">fast transit</text>
+<text x="870" y="292" font-size="10.5" fill="#166534" text-anchor="middle">fast</text>
+<text x="40" y="322" font-size="12.5" fill="#166534">Dense where the drone moved slowly, sparse where it raced — spacing follows the scene, not the clock.</text>
+
+<text x="40" y="352" font-size="13" font-weight="700" fill="#14532d">2 · Target baseline scales with altitude (B/H ratio)</text>
+<text x="40" y="372" font-size="12.5" fill="#166534">Higher altitude needs a longer baseline for the same triangulation strength. Target ≈ 2% of height above ground.</text>
+
+<text x="640" y="352" font-size="13" font-weight="700" fill="#14532d">3 · Sharpest-in-window selection</text>
+<text x="640" y="372" font-size="12.5" fill="#166534">When the trigger fires, we take the sharpest frame nearby —</text>
+<text x="640" y="390" font-size="12.5" fill="#166534">never a blurred one. Blur is judged relative to this video.</text>
+
+<text x="40" y="402" font-size="12.5" font-weight="700" fill="#14532d">Falls back to vision-only parallax when telemetry is unavailable.</text>
+
+<!-- measured -->
+<rect x="20" y="434" width="1104" height="110" rx="8" fill="#1e293b"/>
+<text x="40" y="460" font-size="14" font-weight="700" fill="#fbbf24">WHY THIS MATTERS FOR THE 15-MINUTE BUDGET</text>
+<g font-size="13" fill="#e2e8f0">
+<text x="40" y="488">A 10-minute 4K flight is roughly 18,000 frames. Reconstructing all of them is neither possible nor useful —</text>
+<text x="40" y="510">most are near-duplicates. Selecting the few hundred that carry genuinely new geometry is what makes the</text>
+<text x="40" y="532">time budget reachable at all, and it is the difference between a usable system and an academic pipeline.</text>
+</g>
+</svg>

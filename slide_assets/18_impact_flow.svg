@@ -1,0 +1,119 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 640" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+<defs><marker id="im" markerWidth="10" markerHeight="10" refX="8" refY="3.5" orient="auto"><path d="M0,0 L8,3.5 L0,7 z" fill="#0f172a"/></marker></defs>
+<text x="20" y="30" font-size="23" font-weight="700" fill="#0f172a">Impact — From One Flight to a Decision</text>
+
+<!-- today vs with -->
+<rect x="20" y="60" width="544" height="170" rx="8" fill="#fef2f2" stroke="#dc2626" stroke-width="1.6"/>
+<text x="40" y="86" font-size="15" font-weight="700" fill="#7f1d1d">Today</text>
+<g font-size="12.5" fill="#991b1b">
+<text x="40" y="112">Plan a grid survey · multiple crossing passes</text>
+<text x="40" y="134">Fly repeatedly over the same ground</text>
+<text x="40" y="156">Return, transfer data, run desktop photogrammetry</text>
+<text x="40" y="178">Wait hours for a result</text>
+<text x="40" y="200">Receive one mesh — no indication of what is reliable</text>
+<text x="40" y="222" font-weight="700">Decisions made on geometry that may never have been seen</text>
+</g>
+
+<rect x="596" y="60" width="528" height="170" rx="8" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.6"/>
+<text x="616" y="86" font-size="15" font-weight="700" fill="#14532d">With 3CHAKSHU</text>
+<g font-size="12.5" fill="#166534">
+<text x="616" y="112">Fly one pass</text>
+<text x="616" y="134">Drop the video into a laptop — offline, on site</text>
+<text x="616" y="156">Georeferenced, measurable model in minutes</text>
+<text x="616" y="178">Every surface labelled measured or inferred</text>
+<text x="616" y="200">If one pass was not enough, the system says which line to refly</text>
+<text x="616" y="222" font-weight="700">Decisions made with known confidence</text>
+</g>
+
+<!-- chain -->
+<g>
+<rect x="20" y="256" width="196" height="72" rx="7" fill="#1e293b"/>
+<text x="118" y="282" font-size="13" font-weight="700" fill="#fff" text-anchor="middle">One flight</text>
+<text x="118" y="303" font-size="11.5" fill="#94a3b8" text-anchor="middle">minutes of video</text>
+<text x="118" y="319" font-size="11.5" fill="#94a3b8" text-anchor="middle">no survey grid needed</text>
+
+<rect x="248" y="256" width="196" height="72" rx="7" fill="#334155"/>
+<text x="346" y="282" font-size="13" font-weight="700" fill="#fff" text-anchor="middle">On-site processing</text>
+<text x="346" y="303" font-size="11.5" fill="#cbd5e1" text-anchor="middle">field laptop, offline</text>
+<text x="346" y="319" font-size="11.5" fill="#cbd5e1" text-anchor="middle">nothing transmitted</text>
+
+<rect x="476" y="256" width="196" height="72" rx="7" fill="#475569"/>
+<text x="574" y="282" font-size="13" font-weight="700" fill="#fff" text-anchor="middle">Measurable model</text>
+<text x="574" y="303" font-size="11.5" fill="#e2e8f0" text-anchor="middle">georeferenced, metric</text>
+<text x="574" y="319" font-size="11.5" fill="#e2e8f0" text-anchor="middle">standard GIS formats</text>
+
+<rect x="704" y="256" width="196" height="72" rx="7" fill="#b45309"/>
+<text x="802" y="282" font-size="13" font-weight="700" fill="#fff" text-anchor="middle">Known confidence</text>
+<text x="802" y="303" font-size="11.5" fill="#fde68a" text-anchor="middle">measured vs inferred</text>
+<text x="802" y="319" font-size="11.5" fill="#fde68a" text-anchor="middle">per surface</text>
+
+<rect x="932" y="256" width="192" height="72" rx="7" fill="#16a34a"/>
+<text x="1028" y="282" font-size="13" font-weight="700" fill="#fff" text-anchor="middle">Better decision</text>
+<text x="1028" y="303" font-size="11.5" fill="#dcfce7" text-anchor="middle">act, or refly one line</text>
+</g>
+<g stroke="#0f172a" stroke-width="2">
+<line x1="216" y1="292" x2="242" y2="292" marker-end="url(#im)"/>
+<line x1="444" y1="292" x2="470" y2="292" marker-end="url(#im)"/>
+<line x1="672" y1="292" x2="698" y2="292" marker-end="url(#im)"/>
+<line x1="900" y1="292" x2="926" y2="292" marker-end="url(#im)"/>
+</g>
+
+<!-- sectors table -->
+<g font-size="12.5">
+<rect x="20" y="352" width="1104" height="28" fill="#1e293b"/>
+<text x="34" y="371" font-weight="700" fill="#fff">Sector</text>
+<text x="270" y="371" font-weight="700" fill="#fff">Application</text>
+<text x="640" y="371" font-weight="700" fill="#fff">What changes</text>
+
+<rect x="20" y="380" width="1104" height="28" fill="#f8fafc"/>
+<text x="34" y="399" fill="#0f172a" font-weight="600">Defence &amp; reconnaissance</text>
+<text x="270" y="399" fill="#475569">Border mapping · mission planning</text>
+<text x="640" y="399" fill="#1e40af">Coverage from one sortie · reduced exposure · data never leaves site</text>
+
+<rect x="20" y="408" width="1104" height="28" fill="#fff"/>
+<text x="34" y="427" fill="#0f172a" font-weight="600">Disaster response</text>
+<text x="270" y="427" fill="#475569">Damage assessment · debris volume</text>
+<text x="640" y="427" fill="#1e40af">No second pass over a hazard zone · result within the response window</text>
+
+<rect x="20" y="436" width="1104" height="28" fill="#f8fafc"/>
+<text x="34" y="455" fill="#0f172a" font-weight="600">Infrastructure inspection</text>
+<text x="270" y="455" fill="#475569">Bridges · towers · dams · corridors</text>
+<text x="640" y="455" fill="#1e40af">Measurable models without closing the asset for a survey</text>
+
+<rect x="20" y="464" width="1104" height="28" fill="#fff"/>
+<text x="34" y="483" fill="#0f172a" font-weight="600">Urban planning</text>
+<text x="270" y="483" fill="#475569">Digital twins · cadastral mapping</text>
+<text x="640" y="483" fill="#1e40af">Rapid city-scale models from routine flights</text>
+
+<rect x="20" y="492" width="1104" height="28" fill="#f8fafc"/>
+<text x="34" y="511" fill="#0f172a" font-weight="600">Construction monitoring</text>
+<text x="270" y="511" fill="#475569">Progress tracking · earthwork volume</text>
+<text x="640" y="511" fill="#1e40af">Weekly flights become a quantitative record</text>
+
+<rect x="20" y="520" width="1104" height="28" fill="#fff"/>
+<text x="34" y="539" fill="#0f172a" font-weight="600">Heritage &amp; archaeology</text>
+<text x="270" y="539" fill="#475569">Non-invasive site documentation</text>
+<text x="640" y="539" fill="#1e40af">Records sites where repeat flights are restricted</text>
+</g>
+
+<!-- benefit strip -->
+<rect x="20" y="562" width="266" height="62" rx="7" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+<text x="153" y="584" font-size="12.5" font-weight="700" fill="#1e3a8a" text-anchor="middle">OPERATIONAL</text>
+<text x="153" y="604" font-size="11.5" fill="#1e40af" text-anchor="middle">One pass replaces a grid —</text>
+<text x="153" y="618" font-size="11.5" fill="#1e40af" text-anchor="middle">fewer sorties, less exposure</text>
+
+<rect x="300" y="562" width="266" height="62" rx="7" fill="#fffbeb" stroke="#d97706" stroke-width="1.4"/>
+<text x="433" y="584" font-size="12.5" font-weight="700" fill="#78350f" text-anchor="middle">DECISION SAFETY</text>
+<text x="433" y="604" font-size="11.5" fill="#92400e" text-anchor="middle">Never act on geometry that</text>
+<text x="433" y="618" font-size="11.5" fill="#92400e" text-anchor="middle">was never observed</text>
+
+<rect x="580" y="562" width="266" height="62" rx="7" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.4"/>
+<text x="713" y="584" font-size="12.5" font-weight="700" fill="#14532d" text-anchor="middle">ECONOMIC</text>
+<text x="713" y="604" font-size="11.5" fill="#166534" text-anchor="middle">Open stack on existing hardware</text>
+<text x="713" y="618" font-size="11.5" fill="#166534" text-anchor="middle">replaces per-seat licences</text>
+
+<rect x="860" y="562" width="264" height="62" rx="7" fill="#1e293b"/>
+<text x="992" y="584" font-size="12.5" font-weight="700" fill="#fbbf24" text-anchor="middle">STRATEGIC</text>
+<text x="992" y="604" font-size="11.5" fill="#e2e8f0" text-anchor="middle">Indigenous, sovereign capability</text>
+<text x="992" y="618" font-size="11.5" fill="#e2e8f0" text-anchor="middle">no foreign cloud dependency</text>
+</svg>

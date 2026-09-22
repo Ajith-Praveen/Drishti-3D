@@ -1,0 +1,187 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 700" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+<defs>
+<linearGradient id="hdrIn" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#0369a1"/><stop offset="100%" stop-color="#0284c7"/></linearGradient>
+<linearGradient id="hdrSys" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#7c2d12"/><stop offset="100%" stop-color="#c2410c"/></linearGradient>
+<linearGradient id="hdrBb" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#5b21b6"/><stop offset="100%" stop-color="#7c3aed"/></linearGradient>
+<linearGradient id="hdrOut" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#14532d"/><stop offset="100%" stop-color="#16a34a"/></linearGradient>
+</defs>
+
+<rect x="0" y="0" width="1240" height="700" fill="#0f172a"/>
+<g stroke="#1e293b" stroke-width="1">
+<path d="M0 40 H1240 M0 80 H1240 M0 120 H1240 M0 160 H1240 M0 200 H1240 M0 240 H1240 M0 280 H1240 M0 320 H1240 M0 360 H1240 M0 400 H1240 M0 440 H1240 M0 480 H1240 M0 520 H1240 M0 560 H1240 M0 600 H1240 M0 640 H1240"/>
+<path d="M40 0 V700 M80 0 V700 M120 0 V700 M160 0 V700 M200 0 V700 M240 0 V700 M280 0 V700 M320 0 V700 M360 0 V700 M400 0 V700 M440 0 V700 M480 0 V700 M520 0 V700 M560 0 V700 M600 0 V700 M640 0 V700 M680 0 V700 M720 0 V700 M760 0 V700 M800 0 V700 M840 0 V700 M880 0 V700 M920 0 V700 M960 0 V700 M1000 0 V700 M1040 0 V700 M1080 0 V700 M1120 0 V700 M1160 0 V700 M1200 0 V700"/>
+</g>
+
+<text x="20" y="30" font-size="20" font-weight="700" fill="#f1f5f9">INGEST — Pipeline Graph</text>
+<text x="270" y="30" font-size="13" fill="#64748b">drag nodes from the palette · connect ports · press Run</text>
+
+<!-- INPUT NODES -->
+<g>
+<rect x="30" y="70" width="190" height="78" rx="7" fill="#1e293b" stroke="#0284c7" stroke-width="1.6"/>
+<rect x="30" y="70" width="190" height="24" rx="7" fill="url(#hdrIn)"/>
+<text x="42" y="87" font-size="12.5" font-weight="700" fill="#fff">📹 VIDEO SOURCE</text>
+<text x="42" y="112" font-size="11" fill="#cbd5e1">DJI_0753.MP4</text>
+<text x="42" y="128" font-size="10.5" fill="#64748b">3840×2160 · 242 s · 7255 fr</text>
+<circle cx="220" cy="120" r="5.5" fill="#38bdf8"/>
+<text x="196" y="124" font-size="9" fill="#38bdf8" text-anchor="end">frames</text>
+</g>
+
+<g>
+<rect x="30" y="166" width="190" height="78" rx="7" fill="#1e293b" stroke="#0284c7" stroke-width="1.6"/>
+<rect x="30" y="166" width="190" height="24" rx="7" fill="url(#hdrIn)"/>
+<text x="42" y="183" font-size="12.5" font-weight="700" fill="#fff">🛰 TELEMETRY</text>
+<text x="42" y="208" font-size="11" fill="#cbd5e1">Airdata CSV · 3390 pts</text>
+<text x="42" y="224" font-size="10.5" fill="#4ade80">sync +42.9 s auto</text>
+<circle cx="220" cy="216" r="5.5" fill="#38bdf8"/>
+<text x="196" y="220" font-size="9" fill="#38bdf8" text-anchor="end">gps/imu</text>
+</g>
+
+<g>
+<rect x="30" y="262" width="190" height="78" rx="7" fill="#1e293b" stroke="#0284c7" stroke-width="1.6"/>
+<rect x="30" y="262" width="190" height="24" rx="7" fill="url(#hdrIn)"/>
+<text x="42" y="279" font-size="12.5" font-weight="700" fill="#fff">📷 INTRINSICS</text>
+<text x="42" y="304" font-size="11" fill="#cbd5e1">auto · camera DB</text>
+<text x="42" y="320" font-size="10.5" fill="#64748b">f=3666 px · 84° HFOV</text>
+<circle cx="220" cy="312" r="5.5" fill="#38bdf8"/>
+<text x="196" y="316" font-size="9" fill="#38bdf8" text-anchor="end">K</text>
+</g>
+
+<!-- TRIAGE -->
+<g>
+<rect x="272" y="130" width="184" height="104" rx="7" fill="#1e293b" stroke="#c2410c" stroke-width="1.6"/>
+<rect x="272" y="130" width="184" height="24" rx="7" fill="url(#hdrSys)"/>
+<text x="284" y="147" font-size="12.5" font-weight="700" fill="#fff">⚙ KEYFRAME TRIAGE</text>
+<circle cx="272" cy="176" r="5.5" fill="#38bdf8"/>
+<circle cx="272" cy="200" r="5.5" fill="#38bdf8"/>
+<text x="286" y="180" font-size="10" fill="#94a3b8">frames</text>
+<text x="286" y="204" font-size="10" fill="#94a3b8">gps</text>
+<text x="284" y="224" font-size="10.5" fill="#fbbf24">baseline 7.7 m · 60 kf</text>
+<circle cx="456" cy="188" r="5.5" fill="#a78bfa"/>
+<text x="442" y="192" font-size="9" fill="#a78bfa" text-anchor="end">keyframes</text>
+</g>
+
+<!-- BACKBONE (the star) -->
+<g>
+<rect x="508" y="100" width="212" height="164" rx="7" fill="#1e293b" stroke="#7c3aed" stroke-width="2.4"/>
+<rect x="508" y="100" width="212" height="24" rx="7" fill="url(#hdrBb)"/>
+<text x="520" y="117" font-size="12.5" font-weight="700" fill="#fff">🧠 BACKBONE  [swappable]</text>
+<circle cx="508" cy="146" r="5.5" fill="#a78bfa"/>
+<text x="522" y="150" font-size="10" fill="#94a3b8">keyframes</text>
+<circle cx="508" cy="170" r="5.5" fill="#38bdf8"/>
+<text x="522" y="174" font-size="10" fill="#94a3b8">K + poses (conditioning)</text>
+
+<rect x="522" y="186" width="184" height="22" rx="4" fill="#7c3aed"/>
+<text x="532" y="201" font-size="11" font-weight="700" fill="#fff">● MapAnything (Apache-2.0)</text>
+<rect x="522" y="212" width="184" height="18" rx="4" fill="#312e81"/>
+<text x="532" y="225" font-size="10" fill="#a5b4fc">○ VGGT · ○ π³ / Pi3X · ○ DA3</text>
+<rect x="522" y="234" width="184" height="18" rx="4" fill="#312e81"/>
+<text x="532" y="247" font-size="10" fill="#a5b4fc">○ Null (no GPU — demo safe)</text>
+<circle cx="720" cy="182" r="5.5" fill="#4ade80"/>
+<text x="706" y="186" font-size="9" fill="#4ade80" text-anchor="end">poses+depth</text>
+</g>
+
+<!-- ANALYZER STACK -->
+<g>
+<rect x="772" y="70" width="196" height="60" rx="7" fill="#1e293b" stroke="#c2410c" stroke-width="1.6"/>
+<rect x="772" y="70" width="196" height="22" rx="7" fill="url(#hdrSys)"/>
+<text x="784" y="86" font-size="11.5" font-weight="700" fill="#fff">⚙ MATCH + TRIANGULATE</text>
+<text x="784" y="110" font-size="10.5" fill="#94a3b8">SIFT · RANSAC · tracks</text>
+<circle cx="772" cy="112" r="5" fill="#4ade80"/><circle cx="968" cy="112" r="5" fill="#4ade80"/>
+
+<rect x="772" y="146" width="196" height="60" rx="7" fill="#1e293b" stroke="#c2410c" stroke-width="1.6"/>
+<rect x="772" y="146" width="196" height="22" rx="7" fill="url(#hdrSys)"/>
+<text x="784" y="162" font-size="11.5" font-weight="700" fill="#fff">⚙ BUNDLE ADJUSTMENT</text>
+<text x="784" y="186" font-size="10.5" fill="#94a3b8">GPS + gravity priors</text>
+<circle cx="772" cy="188" r="5" fill="#4ade80"/><circle cx="968" cy="188" r="5" fill="#4ade80"/>
+
+<rect x="772" y="222" width="196" height="60" rx="7" fill="#1e293b" stroke="#f59e0b" stroke-width="2.2"/>
+<rect x="772" y="222" width="196" height="22" rx="7" fill="#b45309"/>
+<text x="784" y="238" font-size="11.5" font-weight="700" fill="#fff">★ OBSERVABILITY</text>
+<text x="784" y="262" font-size="10.5" fill="#fbbf24">covariance → trust tiers</text>
+<circle cx="772" cy="264" r="5" fill="#fbbf24"/><circle cx="968" cy="264" r="5" fill="#fbbf24"/>
+
+<rect x="772" y="298" width="196" height="60" rx="7" fill="#1e293b" stroke="#c2410c" stroke-width="1.6"/>
+<rect x="772" y="298" width="196" height="22" rx="7" fill="url(#hdrSys)"/>
+<text x="784" y="314" font-size="11.5" font-weight="700" fill="#fff">⚙ FUSION</text>
+<text x="784" y="338" font-size="10.5" fill="#94a3b8">confidence-weighted TSDF</text>
+<circle cx="772" cy="340" r="5" fill="#4ade80"/><circle cx="968" cy="340" r="5" fill="#4ade80"/>
+</g>
+
+<!-- OUTPUT -->
+<g>
+<rect x="1020" y="146" width="190" height="140" rx="7" fill="#1e293b" stroke="#16a34a" stroke-width="2"/>
+<rect x="1020" y="146" width="190" height="24" rx="7" fill="url(#hdrOut)"/>
+<text x="1032" y="163" font-size="12.5" font-weight="700" fill="#fff">📦 MODEL OUTPUT</text>
+<circle cx="1020" cy="192" r="5.5" fill="#4ade80"/>
+<text x="1034" y="196" font-size="10.5" fill="#cbd5e1">mesh + point cloud</text>
+<text x="1034" y="216" font-size="10.5" fill="#cbd5e1">OBJ · PLY · GLB · LAS</text>
+<text x="1034" y="234" font-size="10.5" fill="#cbd5e1">DSM · orthomosaic</text>
+<text x="1034" y="252" font-size="10.5" fill="#fbbf24">+ confidence channel</text>
+<text x="1034" y="272" font-size="10.5" fill="#94a3b8">+ accuracy report</text>
+</g>
+
+<!-- WIRES -->
+<g fill="none" stroke-width="2.2">
+<path d="M220 120 C250 120 246 176 272 176" stroke="#38bdf8"/>
+<path d="M220 216 C246 216 250 200 272 200" stroke="#38bdf8"/>
+<path d="M220 312 C300 312 430 200 508 170" stroke="#38bdf8" stroke-dasharray="5 3"/>
+<path d="M456 188 C480 188 486 146 508 146" stroke="#a78bfa"/>
+<path d="M720 182 C742 182 750 112 772 112" stroke="#4ade80"/>
+<path d="M968 112 C994 112 746 146 772 188" stroke="#4ade80" opacity="0.55"/>
+<path d="M968 188 C996 188 744 222 772 264" stroke="#fbbf24" opacity="0.75"/>
+<path d="M968 264 C996 264 746 298 772 340" stroke="#fbbf24" opacity="0.55"/>
+<path d="M968 340 C996 340 996 192 1020 192" stroke="#4ade80"/>
+</g>
+
+<!-- PALETTE -->
+<rect x="30" y="380" width="300" height="180" rx="8" fill="#111827" stroke="#334155"/>
+<text x="46" y="404" font-size="13" font-weight="700" fill="#f1f5f9">NODE PALETTE</text>
+<g font-size="11">
+<rect x="46" y="416" width="268" height="22" rx="4" fill="#0c4a6e"/><text x="56" y="431" fill="#bae6fd">INPUT — Video · Telemetry · Intrinsics · GCP</text>
+<rect x="46" y="442" width="268" height="22" rx="4" fill="#4c1d95"/><text x="56" y="457" fill="#ddd6fe">BACKBONE — MapAnything · VGGT · π³ · DA3 · Null</text>
+<rect x="46" y="468" width="268" height="22" rx="4" fill="#7c2d12"/><text x="56" y="483" fill="#fed7aa">PROCESS — Triage · Match · BA · Fusion</text>
+<rect x="46" y="494" width="268" height="22" rx="4" fill="#78350f"/><text x="56" y="509" fill="#fde68a">ANALYSIS — Observability · Semantics · Masking</text>
+<rect x="46" y="520" width="268" height="22" rx="4" fill="#14532d"/><text x="56" y="535" fill="#bbf7d0">OUTPUT — Model · Report · Refly Plan</text>
+</g>
+
+<!-- INSPECTOR -->
+<rect x="352" y="380" width="300" height="180" rx="8" fill="#111827" stroke="#334155"/>
+<text x="368" y="404" font-size="13" font-weight="700" fill="#f1f5f9">NODE INSPECTOR — Backbone</text>
+<g font-size="11" fill="#94a3b8">
+<text x="368" y="428">Model</text><text x="636" y="428" fill="#e2e8f0" text-anchor="end">MapAnything</text>
+<text x="368" y="450">Checkpoint</text><text x="636" y="450" fill="#4ade80" text-anchor="end">Apache-2.0</text>
+<text x="368" y="472">Input resolution</text><text x="636" y="472" fill="#e2e8f0" text-anchor="end">518 px</text>
+<text x="368" y="494">Window size</text><text x="636" y="494" fill="#e2e8f0" text-anchor="end">14 (overlap 4)</text>
+<text x="368" y="516">Conditioning</text><text x="636" y="516" fill="#4ade80" text-anchor="end">GPS + intrinsics ✓</text>
+<text x="368" y="538">Device</text><text x="636" y="538" fill="#e2e8f0" text-anchor="end">MPS · fp32</text>
+</g>
+
+<!-- VALIDATION -->
+<rect x="674" y="380" width="536" height="180" rx="8" fill="#111827" stroke="#334155"/>
+<text x="690" y="404" font-size="13" font-weight="700" fill="#f1f5f9">GRAPH VALIDATION</text>
+<g font-size="11.5">
+<text x="690" y="428" fill="#4ade80">✓  All required inputs connected</text>
+<text x="690" y="450" fill="#4ade80">✓  Telemetry present — georeferencing enabled</text>
+<text x="690" y="472" fill="#4ade80">✓  Flight profile: nadir · linear · collinearity 0.99</text>
+<text x="690" y="494" fill="#4ade80">✓  Merge strategy auto-selected: telemetry_rotation</text>
+<text x="690" y="516" fill="#fbbf24">⚠  Estimated runtime 3.2 min · peak memory 5.1 GB</text>
+<text x="690" y="538" fill="#94a3b8">Graph is valid and ready to execute.</text>
+</g>
+
+<!-- RUN BAR -->
+<rect x="30" y="586" width="1180" height="72" rx="8" fill="#111827" stroke="#334155"/>
+<rect x="48" y="602" width="140" height="40" rx="6" fill="#16a34a"/>
+<text x="118" y="627" font-size="14" font-weight="700" fill="#fff" text-anchor="middle">▶  RUN GRAPH</text>
+<rect x="200" y="602" width="130" height="40" rx="6" fill="#334155"/>
+<text x="265" y="627" font-size="13" fill="#e2e8f0" text-anchor="middle">⟲ Re-analyze</text>
+<rect x="342" y="602" width="130" height="40" rx="6" fill="#334155"/>
+<text x="407" y="627" font-size="13" fill="#e2e8f0" text-anchor="middle">⬇ Export</text>
+<rect x="484" y="602" width="130" height="40" rx="6" fill="#334155"/>
+<text x="549" y="627" font-size="13" fill="#e2e8f0" text-anchor="middle">📄 Report</text>
+<rect x="626" y="602" width="150" height="40" rx="6" fill="#b45309"/>
+<text x="701" y="627" font-size="13" font-weight="700" fill="#fff" text-anchor="middle">✈ Refly Planner</text>
+<text x="800" y="620" font-size="11.5" fill="#64748b">Save / load graph presets · templates for nadir survey, oblique,</text>
+<text x="800" y="637" font-size="11.5" fill="#64748b">corridor inspection · graphs are plain JSON, versionable</text>
+
+<text x="30" y="682" font-size="12" fill="#475569">Every node maps 1:1 to a pipeline stage that already exists — the graph is a visual front end over the same execution engine, not a parallel implementation.</text>
+</svg>

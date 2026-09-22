@@ -1,0 +1,86 @@
+# Fast profile: the speed-criterion configuration.
+#
+# Every setting here is a measured lever, not a guess:
+#   - 518 px instead of 956: 107 s -> 14.7 s per 8-view window (fp32).
+#   - bf16 autocast on MPS (now the default): a further 2.78x, at a
+#     measured 1.03 mm median point displacement. Combined, a window goes
+#     from ~144 s to ~5.3 s.
+#   - semantics off: it cost 144 s and returned 70-92% UNLABELLED on this
+#     footage (ADE20K does not transfer to nadir aerial). Points export as
+#     unclassified, which is what they honestly were.
+#   - balanced triage spacing (0.10 ~ 12 m at 120 m AGL) instead of
+#     accurate's 0.06: fewer keyframes, and still inside MapAnything's
+#     measured 13-25 m usable footprint so tiles keep overlapping.
+#   - fusion budget back to 4M voxels: 30M produced a 69M-face mesh that
+#     took longer to decimate than to build.
+quality_profile: fast
+
+triage:
+  # NO max_frames_scanned cap. Capping it at 3000 truncated the flight to
+  # 26% of its length (1,924 of 7,255 frames) and still selected 150
+  # keyframes inside that stub -- worse for speed AND for coverage, which
+  # is 20% of the score. Scanning is ~105 s and buys the whole flight.
+  #
+  # Spacing stays at the accurate profile's 0.06. It cannot be widened:
+  # MapAnything's measured usable footprint is only 13-25 m per keyframe,
+  # so beyond ~25 m spacing consecutive tiles stop overlapping and the
+  # model fragments (the defect that took this project days to find).
+  # 1,813 m of flight / 25 m is ~72 keyframes, which is why 77 is right.
+  # Speed therefore has to come from per-window cost, not keyframe count.
+  baseline_to_altitude_ratio: 0.06
+  min_baseline_m: 1.2
+
+geometry:
+  backbone: mapanything
+  # OFF until submap registration is fixed. The sweep refines per-pixel
+  # depth PRECISION, which buys nothing while overlapping windows are
+  # still metres apart -- it cost 459 -> 1119 s of geometry on the v9 run
+  # and could not improve a surface whose error is registration, not
+  # precision. Turn back on once surface thickness is sub-metre.
+  plane_sweep: false
+  max_image_size: 518
+  window_size: 8
+  max_devices: 1
+  prefetch_frames: true
+  depth_anchor: true
+  depth_anchor_max_features: 1500
+  mapanything_mask_edges: false
+  max_points_per_window: 1500000
+
+semantics:
+  enabled: false
+
+matching:
+  # 6000, not the "fast" profile's 2000. The cap speeds the solver, but
+  # fusion.reanchor measures each view's depth against the BA points that
+  # view observed -- 2000 points over 77 cameras is ~26 each, under its
+  # 20-observation floor, so 45 of 149 views went unmeasured and the
+  # ground spread over 368 m. 6000 keeps the solver bounded while leaving
+  # every view enough to measure from.
+  max_points_in_ba: 6000
+  # Half-resolution SIFT detection: the pose prior's cost is dominated by
+  # detecting on 4K frames, and keypoint coordinates are rescaled back to
+  # the full-resolution frame so the poses are unaffected in units.
+  detect_scale: 0.5
+  max_features: 2000
+
+texture:
+  enabled: true
+  texture_size: 2048
+  blend_views: 3
+  max_views: 30
+
+fusion:
+  # Raised from 4000000. With the budget now counting the voxels the
+  # block-sparse TSDF actually allocates (the surface band, not the whole
+  # bounding box), 4M bought a 0.455 m voxel -- but max_mesh_faces then
+  # coarsened it straight back to 1.548 m. Both caps have to move together
+  # or the tighter one silently undoes the other.
+  voxel_count_budget: 16000000
+  pre_tsdf_max_points: 2000000
+  # A 776 x 853 m survey at ~0.5 m voxels is ~5M faces. At 2000000 the
+  # mesher was forced back to a 1.548 m voxel, which cannot represent a
+  # driveway or a pool edge -- the reason the meshed model looked far
+  # worse than the point cloud it came from (1.60 m cloud -> 5.69 m mesh).
+  max_mesh_faces: 8000000
+  ba_reanchor: true

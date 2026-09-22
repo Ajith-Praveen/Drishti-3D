@@ -1,0 +1,79 @@
+[project]
+name = "drishti3d"
+version = "0.1.0"
+description = "Desktop app that turns a single-pass drone video into a georeferenced 3D model."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "numpy",
+    "scipy",
+    "opencv-python",
+    "av",
+    "pyproj",
+    "laspy",
+    "tqdm",
+    "pydantic",
+    "pyyaml",
+    "rich",
+    # Core, not optional: open3d provides the SPARSE TSDF path in
+    # fusion.tsdf. Without it the pipeline silently falls back to a dense
+    # numpy grid that measured 33.5% of total runtime on a 16-keyframe
+    # run -- the single largest avoidable cost in the whole pipeline. A
+    # "works but is several times slower, and nothing tells you" default is
+    # the wrong default, so it moved out of the `geo` extra and in here.
+    "open3d",
+    # Real GeoTIFF output. Without a writer backend, export.geotiff falls
+    # back to .npy + .tfw sidecars, which are NOT the GeoTIFF the
+    # deliverable list asks for and which no GIS opens as a raster.
+    # tifffile, not rasterio: rasterio drags in a full GDAL stack for a
+    # writer this project already hand-rolls the tags for.
+    "tifffile",
+]
+
+[project.optional-dependencies]
+gui = [
+    "pyside6",
+    "vtk",
+]
+ml = [
+    "torch",
+    "torchvision",
+]
+# Per-frame semantic segmentation (drishti3d.semantics). Without this the
+# pipeline still runs: SemanticsStage records itself "skipped" and every
+# point stays UNLABELLED.
+semantics = [
+    "torch",
+    "transformers",
+]
+# Photographic texture baking (drishti3d.fusion.texture). Without xatlas
+# the mesh still exports, with per-vertex colour instead of an atlas.
+texture = [
+    "xatlas",
+]
+
+[project.scripts]
+drishti3d = "drishti3d.app.main:main"
+drishti3d-run = "drishti3d.pipeline.runner:main"
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-qt",
+    "ruff",
+]
+
+[tool.pytest.ini_options]
+# Collect ONLY from tests/. Without this, pytest's default `*_test.py`
+# pattern sweeps up `kaggle/drishti3d_full_test.py` -- a Kaggle notebook
+# export containing `!pip` magics, which is not valid Python and fails the
+# entire run at collection time, before a single real test executes.
+testpaths = ["tests"]
+norecursedirs = ["kaggle", "dist", "build", "packaging", ".venv", "output", "results", "slide_assets"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["drishti3d"]
