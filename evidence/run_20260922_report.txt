@@ -1,0 +1,83 @@
+DRISHTI-3D Accuracy Report Card
+================================
+
+Relative RMSE:            not computed
+Absolute RMSE:            not computed
+Scale error:              not computed
+Mean reprojection error:  5.663 px
+Coverage:                 74.85 %
+Keyframes used:           80
+
+Georeferencing notes:
+  not computed
+
+Telemetry/video time sync:
+  Offset applied:  0 s
+  Offset source:   assumed_zero
+  WARNING: this offset was not measured -- it is an unverified assumption.
+  Video coverage:  0.0 %
+  WARNING: telemetry does not cover the full video time range.
+
+Confidence breakdown (source: photometric_verification):
+  Measured:        12.4 %
+  Low confidence:  27.1 %
+  Inferred:        60.5 %
+
+Scene composition (per reconstructed point):
+  not computed
+
+Terrain model (DTM) and inferred geometry:
+  ground classified by:        morphological
+  points classed as ground:    19.02 %
+  DTM cells interpolated:      89.56 %
+
+Flight profile / merge strategy:
+  Gimbal mode:       varying
+  Trajectory shape:  linear
+  Collinearity:      not computed
+  Merge strategy:    chained_sim3
+  Strategy reason:   neither a trustworthy telemetry orientation on a collinear track, nor a non-collinear GPS track, is available; falling back to chained Sim(3) merging
+
+Telemetry alignment (pose prior, before dense geometry):
+  not computed -- geometry was conditioned on raw telemetry poses
+
+Depth anchoring (backbone depth vs GPS parallax):
+  windows anchored:  0/1
+  depth ratio (parallax / backbone): median not computed, min not computed, max not computed
+  -- a ratio of 1.0 means the backbone's depth already agreed with parallax;
+     anything else is the correction that was applied to that window
+  per window (ratio | altitude m | backbone ground depth m | samples):
+    window   0: refused | - | - |      -
+  window 0 NOT anchored: neither parallax nor GPS altitude could measure this window
+
+Flight-wide depth scale (consensus across windows):
+  not applied -- too few windows measured a depth ratio
+
+Frame placement (measured before fusion, see placement/placement_check.png):
+  verdict:                     FAIL
+  ground spread across windows: not computed m (threshold 1 m)
+  flat-ground thickness:        0 m
+  all-cell thickness:           0 m
+  per window (metres from where GPS says the ground is | merge scale | anchor x merge):
+    window   0:    +0.00 |    1.000 | -
+  merge rescaled submaps over a 1.0x range -- it takes scale from camera baselines, the anchor takes it from ground depth
+  -- fusion cannot fix this. Windows placed metres apart mesh into several copies
+     of the same surface; cross-reference the per-window depth ratios above.
+
+Submap junction alignment:
+  not computed
+
+Independent check points:
+  not computed
+
+Stage timings:
+  ingest: 0.18 s
+  triage: 362.76 s
+  drone_path: 15.23 s
+  coverage: 0.00 s
+  semantics: 0.00 s
+  pose_prior: 0.14 s
+  frame_placement: 0.00 s
+  geometry: 538.45 s
+  bundle_adjustment: 26.39 s
+  fusion: 889.10 s
