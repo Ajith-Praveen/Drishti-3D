@@ -17,6 +17,36 @@ class IngestConfig:
     resize_max_dim: int | None = None
     telemetry_path: str | None = None
     time_offset_sec: float = 0.0
+    # Known camera calibration (the problem statement's optional "camera
+    # intrinsics" input). When camera_fx or camera_hfov_deg is set it
+    # replaces the metadata/camera-DB/HFOV guess in ingest.intrinsics and
+    # is recorded with provenance "user", which focal-from-flow and BA
+    # focal refinement both treat as measured. camera_fy/cx/cy default to
+    # fx and the image centre. camera_dist_coeffs is OpenCV order
+    # (k1, k2, p1, p2[, k3...]) for the RAW video pixels. When the
+    # calibration was made at another resolution, camera_calibration_width
+    # rescales fx/fy/cx/cy to the video's width.
+    camera_fx: float | None = None
+    camera_fy: float | None = None
+    camera_cx: float | None = None
+    camera_cy: float | None = None
+    camera_hfov_deg: float | None = None
+    camera_dist_coeffs: list[float] | None = None
+    camera_calibration_width: int | None = None
+    # Camera-database key (e.g. "dji mavic 3") when the video metadata does
+    # not name the camera itself.
+    camera_model: str | None = None
+    # Image-motion clock check (ingest.timesync, TimeSyncStage). "auto"
+    # replaces an unmeasured (assumed-zero) video-start offset with the one
+    # the keyframes' image rotation implies, and only REPORTS a confident
+    # disagreement with an explicit or auto-detected offset, which wins;
+    # "correct" applies the measurement over those too; "off" skips it.
+    # Measured on PinPoint flight01 it lands within ~0.25 s of the offset
+    # that fits the surveyed points best -- enough to catch the 1.1 s
+    # error that corrupted earlier runs, not to fine-tune below that.
+    auto_sync: str = "auto"
+    auto_sync_search_s: float = 10.0
+    auto_sync_warn_s: float = 0.75
 
 
 @dataclass
@@ -177,6 +207,22 @@ class TriageConfig:
     """
 
     target_keyframes: int = 150
+    # Ceiling for the adaptive GPS spacing threshold, metres. Without it a
+    # takeoff/hover stretch projects a huge keyframe count and the
+    # threshold ratchets up for good (68 m on DJI_1001: only 80 keyframes,
+    # consecutive frames barely overlapping). MapAnything's measured usable
+    # footprint is 13-25 m, so 25 m keeps neighbours overlapping.
+    max_baseline_m: float = 25.0
+    # Overlap-driven spacing (triage.footprint): keyframes are spaced for
+    # this fraction of forward overlap of the MEASURED along-track
+    # footprint. 0.70 means every ground point is seen by ~3.3 consecutive
+    # keyframes -- the minimum for a triangulated (MEASURED) point; more
+    # views mostly add disagreeing regressed depth that stacks in fusion.
+    # 0 disables it (altitude rule + max_baseline_m cap, the old behaviour).
+    forward_overlap: float = 0.70
+    # GPS mode: defer a keyframe while the course is changing faster than
+    # this (deg/s) -- a banking, blurring turn. None disables.
+    max_turn_rate_deg_s: float | None = 12.0
     min_blur_score: float = 1.0
     relative_blur_threshold: float = 0.6
     min_parallax_px: float = 15.0
@@ -193,6 +239,11 @@ class TriageConfig:
     keyframe_cache_max_size: int = 1920
     min_baseline_m: float = 2.0
     use_gps_baseline: bool = True
+    # GPS-baseline mode: decode every frame but convert and blur-score only
+    # the frames a keyframe window search reads (triage.selector._LazyEntry),
+    # and keep each chosen keyframe's full-resolution pixels so the
+    # keyframe cache needs no second decode. Measured: 139 -> ~600 fps.
+    lazy_decode: bool = True
     baseline_to_altitude_ratio: float = 0.10
 
 
@@ -257,6 +308,39 @@ class GeometryConfig:
     depth_anchor_min_samples: int = 30
     # Corrections beyond this are refused as backbone failure, not scale.
     depth_anchor_max_ratio: float = 20.0
+    # Second, per-view fit (geometry.depth_fit): z_ba = a * z_pred + b
+    # against the pose-prior bundle adjustment's sparse points, applied
+    # before the window becomes a submap. Supersedes the parallax anchor
+    # for every view with enough BA points; views without are left as the
+    # anchor produced them.
+    ba_depth_fit: bool = True
+    ba_depth_fit_min_samples: int = 15
+    # Upgrade each view's (a, b) to a quadratic scale field over the image
+    # when it fits the BA points better (geometry.depth_fit). The affine
+    # fit left ~6.5 m RMS at 280 m range on DJI_1001.
+    ba_depth_fit_spatial: bool = True
+    # Rebuild each window's points with the bundle-adjusted world poses
+    # (after the BA depth fit), so every submap is born in the world frame
+    # and the merge is the identity ("world_frame" strategy). Removes the
+    # per-window Sim(3) fits that made multi-window runs 4-35x rougher.
+    # Only engages when the pose prior produced a pose for every keyframe.
+    ba_world_frame: bool = True
+    # Telemetry with GPS but NO gimbal orientation at all: condition on a
+    # nadir camera yawed along the GPS course instead of no pose. Only
+    # correct for straight-down footage; flow-yaw and the pose-prior BA
+    # refine it. Turn off for oblique video.
+    assume_nadir_without_gimbal: bool = True
+    # World-frame mode: points kept across ALL windows for the final merge,
+    # placement check and TSDF (the live model keeps full density).
+    world_frame_total_points: int = 12_000_000
+    # Dense-model view selection (world-frame mode): keep a keyframe's depth
+    # only if it adds ground seen by fewer than this many selected views.
+    # Bundle adjustment still uses every keyframe. 0 disables.
+    dense_target_views: int = 3
+    # ...and only if at least this fraction of its footprint is such
+    # under-covered ground. Measured on flight01 (301 keyframes, lawnmower):
+    # 0.4 kept 90 views, median 5 per ground point (was 15), 96% of area.
+    dense_min_new_fraction: float = 0.4
     # After every window has been anchored, force the outliers onto one
     # flight-wide depth scale (geometry.scale_consensus). The backbone's
     # metric error is a property of the backbone and the footage, not of
@@ -342,6 +426,12 @@ class GeometryConfig:
     gps_altitude_anchor: bool = True
 
     plane_sweep: bool = True
+    # "auto" (default) and "mvs3d": measured per-camera stereo with
+    # cross-view validation and volumetric fusion, for every flight direction.
+    # "full3d": learned depth with volumetric fusion (legacy optional path).
+    # "heightfield" forces 2.5D. "mapanything" is a legacy alias of full3d.
+    dense_method: str = "auto"
+    heightfield_cell_m: float = 0.5
     plane_sweep_hypotheses: int = 48
     plane_sweep_range_fraction: float = 0.15
     # NCC below which a match is not believed. Pixels that fail keep the
@@ -493,12 +583,29 @@ class MatchingConfig:
         number of points/cameras.
     """
 
-    method: str = "sift"
+    # "disk" = DISK features + LightGlue (geometry.learned_matching; needs
+    # the `matching` extra, falls back to SIFT without it). Measured on
+    # flight01: 690 vs 60 verified inliers on the same pair.
+    method: str = "disk"
     max_features: int = 4000
     detect_scale: float = 1.0
+    # DISK/LightGlue budget: half-resolution, 1024 keypoints -- ~0.2 s per
+    # frame and ~0.15 s per pair on an M-series Mac.
+    learned_max_features: int = 1024
+    learned_detect_scale: float = 0.5
+    # Drop a verified pair whose relative rotation misses the IMU/gimbal
+    # gravity direction by more than this (degrees). None disables it.
+    gravity_check_deg: float | None = 3.0
     ratio: float = 0.8
     window: int = 3
     gps_radius_m: float = 15.0
+    # Loop pairs within this share of the measured along-track footprint
+    # (triage.footprint), tying a mapping grid's neighbouring strips
+    # together; 0 = off (see pipeline.stages._MATCH_FOOTPRINT_FRACTION).
+    strip_tie_footprint_fraction: float = 0.0
+    # GPS altitude sigma as a multiple of the horizontal one in bundle
+    # adjustment (geometry.bundle.BAConfig.gps_vertical_sigma_factor).
+    gps_vertical_sigma_factor: float = 1.0
     min_verified_inliers: int = 8
     min_track_length: int = 3
     min_triangulation_angle_deg: float = 1.5
@@ -521,6 +628,12 @@ class MatchingConfig:
     # factor. Only applied where GPS camera priors exist to break the
     # focal/depth ambiguity (see PosePriorStage).
     refine_intrinsics: bool = True
+    # Solve one shared radial lens distortion (k1, k2) in the pose-prior
+    # bundle adjustment when the lens has no known distortion, then
+    # undistort every frame used downstream. An unmodelled lens bends a
+    # nadir strip into a bowl: flight01 (k1 ~ -0.2) solved to cameras
+    # tilted up to 33 deg and 20-28 m off GPS at 0.4 px reprojection.
+    refine_distortion: bool = True
     ba_max_nfev: int | None = None
 
 
@@ -545,7 +658,10 @@ QUALITY_PROFILES: dict[str, dict] = {
     "fast": {
         "max_features": 2000,
         "detect_scale": 0.5,
-        "max_points_in_ba": 2000,
+        # 6000, not 2000: on flight01 the smaller budget left the median
+        # camera 15 observations and headings 8 deg off; 6000 gave 58 and
+        # halved the heading error against surveyed points, at ~2 min.
+        "max_points_in_ba": 6000,
         "ba_max_iterations": 50,
     },
     "balanced": {},
@@ -617,7 +733,10 @@ def apply_triage_quality_profile(triage: TriageConfig, profile: str) -> TriageCo
 # "accurate" is the textbook-larger 1288px for callers with the time
 # budget for the better depth precision it measures out to.
 GEOMETRY_QUALITY_PROFILES: dict[str, dict] = {
-    "fast": {"max_image_size": 518},
+    # Plane sweep off: on DJI_1001 (~280 m range) it cost ~50 s of each
+    # ~65 s window, passed its NCC gate on 0.3-3.8% of pixels and moved
+    # those by a median 39 m -- slower AND noisier than the BA-fitted depth.
+    "fast": {"max_image_size": 518, "plane_sweep": False},
     "balanced": {},
     "accurate": {"max_image_size": 1288},
 }
@@ -781,6 +900,11 @@ class FusionConfig:
     """
 
     voxel_size: float | None = None
+    # Terrain/auto modes only (full3d never collapses ground columns): a
+    # nadir flight that reached the backbone path -- no solved camera for
+    # every keyframe, so no height-field stereo -- is fused by median height
+    # map, as before full-3D mode existed.
+    heightmap_for_nadir: bool = True
     voxel_size_gsd_multiplier: float = 3.0
     # 20M, up from 2M. The 2M figure was calibrated for the pure-numpy
     # dense TSDF; with open3d installed (core dependency) integration is
@@ -899,6 +1023,17 @@ class FusionConfig:
     # 14.8 m-thick slab where a single ground should be ~0.1 m.
     overlap_align: bool = True
 
+    # Voxel size of the running model that world-frame windows are fused
+    # into as they finish (fusion.incremental). Preview-grade: the final
+    # surface still comes from this stage's own fusion.
+    incremental_voxel_m: float = 0.3
+    # Cell size keyframe agreement is counted on for the live model's
+    # confidence tiers: >= 3 keyframes within one cell is MEASURED. One
+    # metre is the problem statement's accuracy requirement.
+    incremental_tier_voxel_m: float = 1.0
+    # Mesh even when the frame placement check FAILED. Off by default:
+    # a failed placement meshes several copies of the same surface.
+    allow_failed_placement: bool = False
     ba_reanchor: bool = True
 
     # Upper bound on mesh faces after extraction and cleanup. 4M is a
@@ -1095,6 +1230,13 @@ class SemanticsConfig:
 
     remove_dynamic: bool = True
     dilate_dynamic_px: int = 9
+    # Skip the stage on downward-looking flights while the checkpoint is a
+    # ground-level (ADE20K/Cityscapes) model: on DJI_1001's nadir frames it
+    # labelled every pixel building or vegetation and found 0% vehicles,
+    # while costing ~0.6 s a frame. Moving objects there are removed by the
+    # measured-3D consistency test and the texture's median instead.
+    # Forward/oblique footage (in domain: sky, people, cars) still runs it.
+    skip_nadir_ground_level: bool = True
 
     min_vote_ratio: float = 0.5
     min_views: int = 2
@@ -1119,6 +1261,43 @@ SEMANTICS_QUALITY_PROFILES: dict[str, dict] = {
 def apply_semantics_quality_profile(semantics: SemanticsConfig, profile: str) -> SemanticsConfig:
     """Return a new ``SemanticsConfig`` with ``SEMANTICS_QUALITY_PROFILES[profile]``'s overrides applied."""
     return _apply_profile(semantics, SEMANTICS_QUALITY_PROFILES, profile)  # type: ignore[return-value]
+
+
+@dataclass
+class ReferenceConfig:
+    """Absolute alignment to a reference orthophoto/DEM (geometry.reference_align).
+
+    Off unless ``ortho_path`` is set: the reference is survey data the
+    operator supplies (or fetches with scripts/fetch_reference.py), never
+    something the pipeline downloads on its own -- the field deployment is
+    air-gapped.
+    """
+
+    ortho_path: str | None = None
+    dem_path: str | None = None
+    gsd_m: float = 0.5
+    min_inliers: int = 25
+    max_shift_m: float = 30.0
+    # "translation" (GPS error is a shift; bare-ground matches when a DEM is
+    # given) or "similarity" (4-DoF; scale drifted 1.3% between runs of one
+    # model on flight01).
+    fit: str = "translation"
+
+
+@dataclass
+class AccuracyConfig:
+    """Independent survey validation settings.
+
+    ``control_points_path`` uses the explicit JSON schema documented in
+    ``docs/control-points.md``. Controls fit the georeferencing transform;
+    checkpoints are withheld and score named reconstructed positions.
+    """
+
+    control_points_path: str | None = None
+    target_m: float = 1.0
+    minimum_checkpoints: int = 3
+    history_path: str | None = None
+    run_id: str | None = None
 
 
 @dataclass
@@ -1157,6 +1336,8 @@ class Config:
     texture: TextureConfig = field(default_factory=TextureConfig)
     fusion: FusionConfig = field(default_factory=FusionConfig)
     export: ExportConfig = field(default_factory=ExportConfig)
+    reference: ReferenceConfig = field(default_factory=lambda: ReferenceConfig())
+    accuracy: AccuracyConfig = field(default_factory=AccuracyConfig)
 
 
 def load_config(path: str | Path) -> Config:
@@ -1196,6 +1377,8 @@ def load_config(path: str | Path) -> Config:
         texture=TextureConfig(**raw.get("texture", {})),
         fusion=FusionConfig(**raw.get("fusion", {})),
         export=ExportConfig(**raw.get("export", {})),
+        reference=ReferenceConfig(**raw.get("reference", {})),
+        accuracy=AccuracyConfig(**raw.get("accuracy", {})),
     )
 
 

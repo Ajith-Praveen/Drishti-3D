@@ -620,8 +620,15 @@ def export_glb(
     faces: np.ndarray | None = None,
     colors: np.ndarray | None = None,
     confidence: np.ndarray | None = None,
+    uv: np.ndarray | None = None,
+    texture: np.ndarray | None = None,
 ) -> None:
     """Write a glTF 2.0 binary (.glb) file, by hand (no gltf library dependency).
+
+    With ``uv`` (per-vertex, OBJ convention: v up) and ``texture`` (RGB
+    uint8), the mesh carries a photographic base-colour texture embedded as
+    JPEG. Vertex colour is then left out: glTF multiplies ``COLOR_0`` into
+    the texture, which would darken it.
 
     Vertex colour is written as the standard ``COLOR_0`` attribute
     (normalized ``UNSIGNED_BYTE`` VEC4, alpha forced to 255); confidence
@@ -671,7 +678,19 @@ def export_glb(
     )
     attributes["POSITION"] = len(accessors) - 1
 
-    if colors is not None:
+    textured = uv is not None and texture is not None
+    if textured:
+        uv_gl = np.asarray(uv, dtype=np.float32).reshape(-1, 2).copy()
+        if uv_gl.shape[0] != n:
+            raise ValueError(f"uv has {uv_gl.shape[0]} entries but there are {n} vertices")
+        uv_gl[:, 1] = 1.0 - uv_gl[:, 1]  # glTF texture origin is the top-left corner
+        uv_view = add_buffer_view(uv_gl.tobytes(), 34962)
+        accessors.append(
+            {"bufferView": uv_view, "componentType": _GLTF_COMPONENT_FLOAT, "count": n, "type": "VEC2"}
+        )
+        attributes["TEXCOORD_0"] = len(accessors) - 1
+
+    if colors is not None and not textured:
         colors_u8 = np.asarray(colors, dtype=np.uint8)
         rgba = np.zeros((n, 4), dtype=np.uint8)
         rgba[:, :3] = colors_u8[:, :3]
@@ -719,6 +738,16 @@ def export_glb(
     else:
         primitive["mode"] = 0  # POINTS, when there's no index buffer
 
+    image_view = None
+    if textured:
+        import cv2
+
+        ok, encoded = cv2.imencode(".jpg", np.asarray(texture, dtype=np.uint8)[:, :, ::-1], [cv2.IMWRITE_JPEG_QUALITY, 92])
+        if not ok:
+            raise ValueError("could not encode the texture image")
+        image_view = add_buffer_view(encoded.tobytes(), None)
+        primitive["material"] = 0
+
     bin_data = b"".join(buffer_chunks)
 
     gltf_json = {
@@ -731,6 +760,18 @@ def export_glb(
         "scenes": [{"nodes": [0]}],
         "scene": 0,
     }
+    if image_view is not None:
+        gltf_json["images"] = [{"bufferView": image_view, "mimeType": "image/jpeg"}]
+        # LINEAR magnification, LINEAR_MIPMAP_LINEAR minification, clamped edges.
+        gltf_json["samplers"] = [{"magFilter": 9729, "minFilter": 9987, "wrapS": 33071, "wrapT": 33071}]
+        gltf_json["textures"] = [{"sampler": 0, "source": 0}]
+        gltf_json["materials"] = [
+            {
+                "name": "drishti3d_true_ortho",
+                "pbrMetallicRoughness": {"baseColorTexture": {"index": 0}, "metallicFactor": 0.0, "roughnessFactor": 1.0},
+                "doubleSided": True,
+            }
+        ]
 
     json_bytes = json.dumps(gltf_json).encode("utf-8")
     json_bytes = _pad_bytes(json_bytes, 4, b" ")
@@ -856,11 +897,20 @@ def export_las(path: str | Path, pc: PointCloud, crs: str | None = None) -> None
     has_cov = pc.covariance is not None
     has_sem = pc.semantic_class is not None
     has_sem_conf = pc.semantic_confidence is not None
+    has_sigma = pc.uncertainty_m is not None and len(pc.uncertainty_m) == len(xyz)
     if has_conf:
         header.add_extra_dim(laspy.ExtraBytesParams(name="confidence", type=np.uint8, description="types.Confidence tier"))
     if has_cov:
         header.add_extra_dim(
             laspy.ExtraBytesParams(name="cov_trace", type=np.float32, description="trace(covariance), m^2")
+        )
+    if has_sigma:
+        header.add_extra_dim(
+            laspy.ExtraBytesParams(
+                name="height_uncertainty_m",
+                type=np.float32,
+                description="height uncertainty, m",
+            )
         )
     if has_sem:
         header.add_extra_dim(
@@ -900,6 +950,8 @@ def export_las(path: str | Path, pc: PointCloud, crs: str | None = None) -> None
     if has_cov:
         trace = np.trace(pc.covariance, axis1=1, axis2=2).astype(np.float32)
         las.cov_trace = trace
+    if has_sigma:
+        las.height_uncertainty_m = np.asarray(pc.uncertainty_m, dtype=np.float32)
 
     if has_sem:
         from drishti3d.semantics.classes import ASPRS_FROM_CANONICAL

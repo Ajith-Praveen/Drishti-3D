@@ -38,3 +38,9 @@ results/
 # Large capture media (exceeds GitHub's 100 MB file limit)
 *.mp4
 *.mov
+*.mkv
+
+# Third-party validation datasets, fetched not authored (see docs for sources)
+flight01/
+flight02/
+*.zip

@@ -31,6 +31,20 @@ from drishti3d.export.placement import (
 )
 
 
+@pytest.mark.parametrize("stacked", [False, True])
+def test_mesh_sampling_keeps_ground_cells_and_rejects_stacks(tmp_path, stacked):
+    x, y = np.meshgrid(np.arange(0., 100., .5), np.arange(0., 100., .5))
+    ground = np.c_[x.ravel(), y.ravel(), np.zeros(x.size)]
+    xyz = np.concatenate([ground, ground + [0., 0., 6.]]) if stacked else ground
+    report = write_placement_check(
+        tmp_path, xyz, np.zeros(len(xyz), dtype=int), gps_ground_z=0.,
+        cell_m=4., max_points=5000, size=256,
+    )
+    assert report.metrics["cells_measured"] > 20
+    assert report.verdict == ("FAIL" if stacked else "PASS")
+    assert report.metrics["sampling"] == "complete_spatial_cells"
+
+
 def _ground(n_submaps: int = 6, per: int = 4000, z_offsets=None, seed: int = 0):
     """A flat field imaged by ``n_submaps`` overlapping windows.
 
@@ -393,3 +407,126 @@ def test_merge_scale_skips_submaps_it_cannot_measure() -> None:
     )
     merged = [Pose(R=np.eye(3), t=np.array([i * 20.0, 0.0, 120.0])) for i in range(2)]
     assert _merge_scale_per_submap([stationary], merged) == {}
+
+
+def test_placement_verdict_single_submap_uses_gps_ground() -> None:
+    from drishti3d.export.placement import PlacementReport
+
+    # v22: one window, ground 18 m below GPS, 7.9 m thick -- a real FAIL.
+    assert PlacementReport({"gps_ground_error_median_m": -18.08, "flat_thickness_median_m": 7.9}).verdict == "FAIL"
+    # One window, within GPS error and thin: PASS, not the old unconditional FAIL.
+    ok = PlacementReport({"gps_ground_error_median_m": 1.2, "flat_thickness_median_m": 0.4})
+    assert ok.verdict == "PASS" and ok.passed
+    # Nothing measurable is reported as such, never as a pass.
+    none = PlacementReport({})
+    assert none.verdict == "UNMEASURED" and not none.passed
+    assert none.as_dict()["verdict"] == "UNMEASURED"
+
+
+def test_placement_verdict_multi_submap_uses_spread() -> None:
+    from drishti3d.export.placement import PlacementReport
+
+    assert PlacementReport({"ground_spread_m": 0.6, "gps_ground_error_median_m": -9.0}).verdict == "PASS"
+    assert PlacementReport({"ground_spread_m": 1.4}).verdict == "FAIL"
+
+
+def test_spread_measures_overlap_not_terrain_relief() -> None:
+    import numpy as np
+
+    from drishti3d.export.placement import placement_metrics
+
+    rng = np.random.default_rng(0)
+    # Window 0 over x in [0, 120] on a slope rising 0.4 m/m (48 m of relief);
+    # window 1 over x in [80, 200], placed 0.3 m too high. They share x in [80, 120].
+    def ground(x):
+        return 0.4 * x
+
+    x0 = rng.uniform(0, 120, 40000)
+    x1 = rng.uniform(80, 200, 40000)
+    y0, y1 = rng.uniform(0, 60, 40000), rng.uniform(0, 60, 40000)
+    xyz = np.concatenate([np.c_[x0, y0, ground(x0)], np.c_[x1, y1, ground(x1) + 0.3]])
+    labels = np.r_[np.zeros(40000), np.ones(40000)].astype(int)
+
+    m = placement_metrics(xyz, labels).as_dict()
+    assert m["overlap_cells"] > 0
+    assert m["ground_spread_global_m"] > 20  # the old whole-flight number: relief, not error
+    assert abs(m["ground_spread_m"] - 0.3) < 0.25
+    assert m["verdict"] == "PASS"
+
+
+# ---------------------------------------------------------------------------
+# image-derived reference ground (bundle-adjusted points) vs takeoff height
+# ---------------------------------------------------------------------------
+
+
+def _sloped_ground(n: int = 40_000, slope: float = 0.08, offset: float = 0.0, seed: int = 3) -> np.ndarray:
+    """Ground falling away from the launch point: z = -slope * x (+ offset)."""
+    rng = np.random.default_rng(seed)
+    xy = rng.uniform(0.0, 200.0, size=(n, 2))
+    z = -slope * xy[:, 0] + offset + rng.normal(0.0, 0.05, n)
+    return np.c_[xy, z]
+
+
+def test_reference_ground_overrides_a_wrong_takeoff_height() -> None:
+    """A correctly placed window on terrain 8 m below takeoff passes against BA points."""
+    dense = _sloped_ground()
+    labels = np.zeros(len(dense), dtype=np.int64)
+    sparse = _sloped_ground(n=3000, seed=9)
+    report = placement_metrics(dense, labels, gps_ground_z=0.0, reference_ground=sparse, reference_source="bundle-adjusted")
+    assert report.metrics["gps_ground_error_median_m"] < -5.0  # takeoff height would fail it
+    assert abs(report.metrics["reference_ground_error_median_m"]) < 0.3
+    assert report.metrics["reference_ground_source"] == "bundle-adjusted"
+    assert report.verdict == "PASS"
+    assert "bundle-adjusted ground" in report.summary()
+
+
+def test_reference_ground_catches_a_misplaced_window() -> None:
+    dense = _sloped_ground(offset=9.0)
+    labels = np.zeros(len(dense), dtype=np.int64)
+    sparse = _sloped_ground(n=3000, seed=9)
+    report = placement_metrics(dense, labels, reference_ground=sparse)
+    assert report.metrics["reference_ground_error_median_m"] > 8.5
+    assert report.verdict == "FAIL"
+
+
+def test_agreeing_windows_that_all_sit_off_the_reference_fail() -> None:
+    """Two windows can agree with each other and share one depth-scale error."""
+    a, b = _sloped_ground(seed=1, offset=7.0), _sloped_ground(seed=2, offset=7.0)
+    xyz = np.vstack([a, b])
+    labels = np.r_[np.zeros(len(a), dtype=np.int64), np.ones(len(b), dtype=np.int64)]
+    report = placement_metrics(xyz, labels, reference_ground=_sloped_ground(n=3000, seed=9))
+    assert report.ground_spread_m is not None and report.ground_spread_m < 0.5
+    assert report.verdict == "FAIL"
+    assert placement_metrics(xyz, labels).verdict == "PASS"  # without a reference: spread alone
+
+
+def test_too_sparse_reference_is_ignored() -> None:
+    dense = _sloped_ground()
+    labels = np.zeros(len(dense), dtype=np.int64)
+    report = placement_metrics(dense, labels, gps_ground_z=0.0, reference_ground=_sloped_ground(n=3))
+    assert "reference_ground_error_median_m" not in report.metrics
+
+
+def test_takeoff_height_tolerance_grows_with_flight_height() -> None:
+    """The takeoff plane is an assumption: 13 m of real terrain relief at 108 m AGL must not fail."""
+    from drishti3d.export.placement import PlacementReport
+
+    relief = PlacementReport({"gps_ground_error_median_m": -13.4, "gps_agl_m": 108.0})
+    assert relief.gps_ground_threshold_m == pytest.approx(27.0)
+    assert relief.verdict == "PASS"
+    # A depth scale off by ~50% at the same height still fails.
+    assert PlacementReport({"gps_ground_error_median_m": -55.0, "gps_agl_m": 108.0}).verdict == "FAIL"
+    # Without a known height the old 5 m tolerance applies.
+    assert PlacementReport({"gps_ground_error_median_m": -13.4}).verdict == "FAIL"
+
+
+def test_forward_view_verdict_is_three_dimensional():
+    """A level, forward camera is judged by whether the dense surface passes through the solved points."""
+    from drishti3d.export.placement import PlacementReport
+
+    ok = PlacementReport({"forward_view": True, "ba_to_dense_median_m": 0.2, "ba_to_dense_limit_m": 1.0,
+                          "reference_ground_error_median_m": -5.25})  # canopy points are not ground
+    assert ok.verdict == "PASS" and "forward view" in ok.summary()
+    bad = PlacementReport({"forward_view": True, "ba_to_dense_median_m": 2.5, "ba_to_dense_limit_m": 1.0})
+    assert bad.verdict == "FAIL"
+    assert PlacementReport({"forward_view": True}).verdict == "UNMEASURED"

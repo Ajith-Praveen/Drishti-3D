@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import cv2
 import numpy as np
-import pytest
 
 from drishti3d.geometry.plane_sweep import refine_depth_by_plane_sweep
 from drishti3d.types import CameraIntrinsics, Pose
@@ -19,7 +18,7 @@ from drishti3d.types import CameraIntrinsics, Pose
 _NADIR_R = np.diag([1.0, -1.0, -1.0])
 
 
-def _scene(n_views=4, altitude=120.0, baseline=20.0, w=192, h=144, fx=260.0, seed=0, box=True):
+def _scene(n_views=4, altitude=120.0, baseline=20.0, w=192, h=144, fx=260.0, seed=0, box=True, yaw_step=0.0):
     """Nadir views of a textured ground plane (z=0) with a raised slab.
 
     Returns (images, true_depth, poses, intrinsics). Depth is exact: it is
@@ -31,12 +30,16 @@ def _scene(n_views=4, altitude=120.0, baseline=20.0, w=192, h=144, fx=260.0, see
     gsd, origin = 0.35, np.array([-140.0, -140.0])
     intr = CameraIntrinsics(fx=fx, fy=fx, cx=w / 2, cy=h / 2, width=w, height=h)
     K = intr.K()
+    K[:2, 2] -= 0.5  # OpenCV array coordinates vs camera pixel centres.
 
     images, depths, poses = [], [], []
     ys, xs = np.meshgrid(np.arange(h) + 0.5, np.arange(w) + 0.5, indexing="ij")
     for i in range(n_views):
         C = np.array([baseline * i, 0.0, altitude])
-        pose = Pose(R=_NADIR_R, t=C)
+        angle = np.radians(yaw_step * i)
+        yaw = np.array([[np.cos(angle), -np.sin(angle), 0],
+                        [np.sin(angle), np.cos(angle), 0], [0, 0, 1]])
+        pose = Pose(R=yaw @ _NADIR_R, t=C)
         r_cw = pose.R.T
         t_cw = -r_cw @ C
         Hw = K @ np.column_stack([r_cw[:, 0], r_cw[:, 1], t_cw])
@@ -133,3 +136,11 @@ def test_unrefined_pixels_keep_the_backbone_depth():
     noisy = truth * 1.06
     out = refine_depth_by_plane_sweep(np.stack(images), noisy, poses, intr, min_ncc=0.999, min_views=1)
     np.testing.assert_allclose(out.depth[~out.refined], noisy[~out.refined])
+
+
+def test_rotating_cameras_recover_known_depth():
+    images, truth, poses, intr = _scene(box=False, yaw_step=25.0, altitude=60.0)
+    noisy = truth * 1.06
+    out = refine_depth_by_plane_sweep(np.stack(images), noisy, poses, intr, min_views=1)
+    assert out.stats["refined_pct"] > 20, out.stats
+    assert np.median(np.abs(out.depth[out.refined] - truth[out.refined])) < 0.15

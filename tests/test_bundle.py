@@ -500,3 +500,188 @@ def test_windowed_bundle_adjust_anchors_prevent_drift():
             continue
         err = np.linalg.norm(results[1].poses[local_idx].t - true_poses[g].t)
         assert err < 0.5
+
+
+# ---------------------------------------------------------------------------
+# flight01 failure modes: gauge anchors at bad seeds, unmodelled lens doming
+# ---------------------------------------------------------------------------
+
+
+def _strip_scene(rng: np.random.Generator, dist=(0.0, 0.0), n_pts: int = 500, noise_px: float = 0.3):
+    """flight01-shaped strip: 12 nadir cameras 27 m apart at 108 m AGL, 1280x720, fx 877.
+
+    Observations come from ``cv2.projectPoints`` (an independent lens
+    implementation) with OpenCV radial ``dist`` = (k1, k2).
+    """
+    import cv2
+
+    from drishti3d.geometry.bundle import gimbal_to_R
+
+    intr = CameraIntrinsics(fx=877.0, fy=877.0, cx=640.0, cy=360.0, width=1280, height=720)
+    heading = 40.0
+    along = np.array([np.sin(np.radians(heading)), np.cos(np.radians(heading)), 0.0])
+    cross = np.array([along[1], -along[0], 0.0])
+    poses = [
+        Pose(R=gimbal_to_R(-heading + rng.normal(0, 2), -90 + rng.normal(0, 1), rng.normal(0, 1)),
+             t=i * 27.0 * along + np.array([0.0, 0.0, 108.0]))
+        for i in range(12)
+    ]
+    s = rng.uniform(-50, 11 * 27 + 50, n_pts)
+    c = rng.uniform(-75, 75, n_pts)
+    pts = s[:, None] * along + c[:, None] * cross
+    pts[:, 2] = 3.0 * np.sin(pts[:, 0] / 40.0) + 2.0 * np.cos(pts[:, 1] / 55.0)
+    D = np.array([dist[0], dist[1], 0.0, 0.0, 0.0])
+    obs_cam, obs_pt, obs_uv = [], [], []
+    for ci, p in enumerate(poses):
+        rvec = cv2.Rodrigues(p.R.T)[0]
+        tvec = -p.R.T @ p.t
+        uv = cv2.projectPoints(pts.reshape(-1, 1, 3), rvec, tvec, intr.K(), D)[0].reshape(-1, 2)
+        inb = (uv[:, 0] >= 0) & (uv[:, 0] < 1280) & (uv[:, 1] >= 0) & (uv[:, 1] < 720)
+        for pi in np.flatnonzero(inb):
+            obs_cam.append(ci)
+            obs_pt.append(int(pi))
+            obs_uv.append(uv[pi] + rng.normal(0, noise_px, 2))
+    obs_cam, obs_pt, obs_uv = np.array(obs_cam), np.array(obs_pt), np.array(obs_uv)
+    seen = np.bincount(obs_pt, minlength=n_pts) >= 2
+    keep = seen[obs_pt]
+    remap = np.cumsum(seen) - 1
+    priors = [
+        CameraPrior(camera_idx=i, gps_position=p.t + rng.normal(0, 1.0, 3), gps_sigma_m=5.0,
+                    gimbal_pitch_deg=-90.0, gimbal_roll_deg=0.0, tilt_sigma_deg=5.0)
+        for i, p in enumerate(poses)
+    ]
+    return poses, intr, pts[seen], obs_cam[keep], remap[obs_pt[keep]], obs_uv[keep], priors
+
+
+def _yaw_error_deg(pose: Pose, truth: Pose) -> float:
+    return float(np.degrees(np.linalg.norm(Rotation.from_matrix(truth.R.T @ pose.R).as_rotvec())))
+
+
+def _strip_problem(truth, intr, pts, obs_cam, obs_pt, obs_uv, priors, rng, yaw_error_deg=(25.0, 25.0)):
+    seeds = []
+    for i, p in enumerate(truth):
+        err = yaw_error_deg[i] if i < len(yaw_error_deg) else rng.normal(0, 3)
+        seeds.append(Pose(R=Rotation.from_euler("z", err, degrees=True).as_matrix() @ p.R, t=priors[i].gps_position.copy()))
+    return BAProblem(
+        cameras=seeds, intrinsics=[intr] * len(truth), points=pts + rng.normal(0, 3.0, pts.shape),
+        obs_camera_idx=obs_cam, obs_point_idx=obs_pt, obs_uv=obs_uv, camera_priors=priors,
+    )
+
+
+def test_priors_define_the_datum_so_no_seed_pose_is_frozen():
+    from drishti3d.geometry.bundle import _default_gauge_fix
+
+    rng = np.random.default_rng(11)
+    truth, intr, pts, oc, op, ouv, priors = _strip_scene(rng, n_pts=60)
+    base = dict(cameras=truth, intrinsics=[intr] * 12, points=pts, obs_camera_idx=oc, obs_point_idx=op, obs_uv=ouv)
+    assert _default_gauge_fix(BAProblem(**base, camera_priors=priors)) == set()
+    # Two GPS fixes cannot pin rotation about their baseline.
+    assert _default_gauge_fix(BAProblem(**base, camera_priors=priors[:2])) == {0, 1}
+    # A straight strip with GPS but no gravity prior leaves the roll about the line free.
+    gps_only = [CameraPrior(camera_idx=p.camera_idx, gps_position=p.gps_position, gps_sigma_m=5.0) for p in priors]
+    assert _default_gauge_fix(BAProblem(**base, camera_priors=gps_only)) == {0, 1}
+    # GPS spread below the noise defines no scale.
+    hover = [CameraPrior(camera_idx=i, gps_position=np.array([0.0, 0.0, 100.0]) + i * 0.1, gps_sigma_m=5.0,
+                         gimbal_pitch_deg=-90.0) for i in range(12)]
+    assert _default_gauge_fix(BAProblem(**base, camera_priors=hover)) == {0, 1}
+
+
+def test_badly_seeded_first_cameras_are_corrected_not_frozen():
+    """flight01's clip starts in a turn: cameras 0/1 had ~25-29 deg yaw seeds.
+
+    Freezing them as gauge anchors (the old default) forced the whole
+    strip onto their wrong heading -- 169 m at the far end. With the
+    priors as datum they are corrected like any other camera.
+    """
+    rng = np.random.default_rng(12)
+    truth, intr, pts, oc, op, ouv, priors = _strip_scene(rng)
+
+    solved = bundle_adjust(_strip_problem(truth, intr, pts, oc, op, ouv, priors, np.random.default_rng(1)), BAConfig())
+    assert solved.param_layout.fixed_camera_indices == set()
+    assert max(_yaw_error_deg(p, t) for p, t in zip(solved.poses, truth, strict=True)) < 1.0
+    assert max(np.linalg.norm(p.t - t.t) for p, t in zip(solved.poses, truth, strict=True)) < 3.0
+
+    frozen = _strip_problem(truth, intr, pts, oc, op, ouv, priors, np.random.default_rng(1))
+    frozen.fixed_camera_indices = {0, 1}
+    anchored = bundle_adjust(frozen, BAConfig())
+    assert max(np.linalg.norm(p.t - t.t) for p, t in zip(anchored.poses, truth, strict=True)) > 15.0
+
+
+def test_projection_matches_opencv_lens_model():
+    import cv2
+
+    from drishti3d.geometry.bundle import _project
+
+    rng = np.random.default_rng(13)
+    R = Rotation.from_rotvec(rng.normal(0, 0.1, 3)).as_matrix()
+    t = rng.normal(0, 1, 3)
+    P = rng.uniform(-3, 3, (50, 3)) + np.array([0, 0, 10.0])
+    K = np.array([[800.0, 0, 640], [0, 790.0, 360], [0, 0, 1]])
+    D = np.array([-0.21, 0.04, 0.001, -0.002, 0.01])
+    u, v = _project(np.repeat(R[None], 50, 0), np.repeat(t[None], 50, 0),
+                    np.tile([800.0, 790.0, 640.0, 360.0], (50, 1)), np.tile(D, (50, 1)), P)
+    ref = cv2.projectPoints(P.reshape(-1, 1, 3), cv2.Rodrigues(R.T)[0], -R.T @ t, K, D)[0].reshape(-1, 2)
+    np.testing.assert_allclose(np.stack([u, v], 1), ref, atol=1e-6)
+
+
+def test_unmodelled_barrel_distortion_domes_the_strip_and_shared_lens_removes_it():
+    """flight01's lens (k1 ~ -0.2): a pinhole BA bends a nadir strip into a bowl.
+
+    The reprojection error stays small either way -- the bowl IS how the
+    pinhole model absorbs the lens -- so only the physical checks tell
+    them apart: camera tilts and heights. Solving the shared (k1, k2)
+    recovers the lens and a flat, level strip.
+    """
+    rng = np.random.default_rng(14)
+    k1, k2 = -0.22, 0.045
+    truth, intr, pts, oc, op, ouv, priors = _strip_scene(rng, dist=(k1, k2))
+
+    def solve(**flags):
+        problem = _strip_problem(truth, intr, pts, oc, op, ouv, priors, np.random.default_rng(2), yaw_error_deg=())
+        return bundle_adjust(problem, BAConfig(**flags))
+
+    def worst_tilt(result):
+        return max(np.degrees(np.arccos(np.clip(np.dot(p.R[:, 2], t.R[:, 2]), -1, 1)))
+                   for p, t in zip(result.poses, truth, strict=True))
+
+    pinhole = solve()
+    assert worst_tilt(pinhole) > 8.0
+
+    lens = solve(refine_distortion=True)
+    assert lens.lens["k1"] == pytest.approx(k1, abs=0.01)
+    assert lens.lens["k2"] == pytest.approx(k2, abs=0.02)
+    assert worst_tilt(lens) < 1.0
+    assert max(np.linalg.norm(p.t - t.t) for p, t in zip(lens.poses, truth, strict=True)) < 3.0
+    assert lens.rmse_after_px < 0.6
+    assert all(np.allclose(k.dist_coeffs[:2], [lens.lens["k1"], lens.lens["k2"]]) for k in lens.intrinsics)
+
+
+def test_schur_solver_matches_or_beats_scipy_with_outliers_and_huber():
+    """The default Schur-complement LM must land where scipy's trf does (or lower), with gross outliers."""
+    import dataclasses
+
+    rng = np.random.default_rng(7)
+    true_poses, intr, pts, obs_cam, obs_pt, obs_uv = _make_recovery_scene(rng, n_cams=12, n_pts=150)
+    uv = obs_uv + rng.normal(0.0, 0.5, obs_uv.shape)
+    bad = rng.random(len(uv)) < 0.05
+    uv[bad] += rng.normal(0.0, 25.0, (int(bad.sum()), 2))  # 5% gross mismatches
+    seeds = []
+    for p in true_poses:
+        t = p.t + rng.normal(0.0, 1.0, 3)
+        seeds.append(Pose(R=p.R.copy(), t=t))
+    priors = [CameraPrior(camera_idx=i, gps_position=true_poses[i].t + rng.normal(0.0, 0.5, 3), gps_sigma_m=1.0)
+              for i in range(len(true_poses))]
+
+    def solve(solver):
+        problem = BAProblem(
+            cameras=[Pose(R=s.R.copy(), t=s.t.copy()) for s in seeds], intrinsics=list(intr),
+            points=pts.copy(), obs_camera_idx=obs_cam, obs_point_idx=obs_pt,
+            obs_uv=uv, camera_priors=priors,
+        )
+        return bundle_adjust(problem, dataclasses.replace(BAConfig(), solver=solver))
+
+    fast, ref = solve("schur"), solve("scipy")
+    med = lambda r: float(np.median(np.linalg.norm(r.residuals_px, axis=1)))  # noqa: E731
+    assert med(fast) <= med(ref) + 0.05
+    cam_err = lambda r: float(np.median([np.linalg.norm(p.t - q.t) for p, q in zip(r.poses, true_poses)]))  # noqa: E731
+    assert cam_err(fast) <= cam_err(ref) + 0.05, (cam_err(fast), cam_err(ref))

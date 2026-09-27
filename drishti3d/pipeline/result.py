@@ -255,6 +255,23 @@ class PipelineResult:
     video_path: str | None = None
     telemetry_path: str | None = None
 
+    @property
+    def quality(self) -> dict:
+        from drishti3d.pipeline.quality import quality_fields
+
+        return quality_fields(self.report or {}, self.stage_results,
+                              self.point_cloud is not None and len(self.point_cloud.xyz) > 0)
+
+    @property
+    def outcome(self) -> str:
+        return self.quality["outcome"]
+
+    @property
+    def outcome_label(self) -> str:
+        from drishti3d.pipeline.quality import OUTCOME_LABELS
+
+        return OUTCOME_LABELS[self.outcome]
+
     # ------------------------------------------------------------------
     def summary(self) -> str:
         """A human-readable text block: stage table + point/pose counts + report."""
@@ -266,6 +283,7 @@ class PipelineResult:
             "",
             f"Video:      {self.video_path or 'n/a'}",
             f"Telemetry:  {self.telemetry_path or 'n/a'}",
+            f"Outcome:    {self.outcome_label}",
             f"Keyframes:  {len(self.keyframes)}",
             f"Submaps:    {len(self.submaps)}",
             f"Points:     {n_points}",
@@ -361,10 +379,20 @@ class PipelineResult:
             card["confidence_source"] = fusion["confidence_source"]
 
         geometry = self.artifacts("geometry")
+        # The configured neural backbone may not have run: auto uses stereo.
+        # Prefer the stage's actual method, including when opening older runs.
+        method = geometry.get("backbone")
+        if method in ("mvs3d", "heightfield_mvs"):
+            card["backbone"] = method
+            if self.mesh_faces is not None and len(self.mesh_faces):
+                card["reconstruction_representation"] = (
+                    "3D volumetric mesh" if method == "mvs3d" else "2.5D height-field surface"
+                )
         for key in ("merge_strategy", "merge_strategy_reason", "placement", "depth_anchor", "flight_profile"):
             if missing(key) and geometry.get(key) is not None:
                 card[key] = geometry[key]
 
+        card.update(self.quality)
         return card
 
     # ------------------------------------------------------------------
@@ -393,6 +421,8 @@ class PipelineResult:
                 arrays["pc_semantic_class"] = np.asarray(self.point_cloud.semantic_class)
             if self.point_cloud.semantic_confidence is not None:
                 arrays["pc_semantic_confidence"] = np.asarray(self.point_cloud.semantic_confidence)
+            if self.point_cloud.uncertainty_m is not None:
+                arrays["pc_uncertainty_m"] = np.asarray(self.point_cloud.uncertainty_m)
 
         if self.mesh_faces is not None and len(self.mesh_faces):
             # int32 halves the file for any mesh under 2^31 vertices,
@@ -414,7 +444,8 @@ class PipelineResult:
             "n_poses": n_poses,
             "keyframes": [_keyframe_to_dict(kf) for kf in self.keyframes],
             "stage_results": [sr.to_dict() for sr in self.stage_results],
-            "report": self.report,
+            "outcome": self.outcome,
+            "report": {**self.report, **self.quality},
             "config": _config_to_dict(self.config),
             "video_path": self.video_path,
             "telemetry_path": self.telemetry_path,
@@ -443,6 +474,7 @@ class PipelineResult:
                     confidence=arrays.get("pc_confidence", None),
                     semantic_class=arrays.get("pc_semantic_class", None),
                     semantic_confidence=arrays.get("pc_semantic_confidence", None),
+                    uncertainty_m=arrays.get("pc_uncertainty_m", None),
                 )
 
             mesh_faces = arrays["mesh_faces"] if "mesh_faces" in arrays.files else None
@@ -455,6 +487,9 @@ class PipelineResult:
         keyframes = [_keyframe_from_dict(kd) for kd in meta.get("keyframes", [])]
         stage_results = [StageResult.from_dict(sd) for sd in meta.get("stage_results", [])]
         config = _config_from_dict(meta.get("config"))
+        report = dict(meta.get("report") or {})
+        if meta.get("outcome") in {"failed", "cancelled"}:
+            report["outcome"] = meta["outcome"]
 
         return cls(
             keyframes=keyframes,
@@ -463,7 +498,7 @@ class PipelineResult:
             mesh_faces=mesh_faces,
             poses=poses,
             stage_results=stage_results,
-            report=meta.get("report", {}),
+            report=report,
             config=config,
             video_path=meta.get("video_path"),
             telemetry_path=meta.get("telemetry_path"),

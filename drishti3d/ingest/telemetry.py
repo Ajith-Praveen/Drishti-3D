@@ -231,6 +231,9 @@ def resample_telemetry(
     pitch_arr = _field(lambda s: s.gimbal_pitch)
     roll_arr = _field(lambda s: s.gimbal_roll)
     yaw_arr = _field(lambda s: s.gimbal_yaw)
+    # Interpolate through North, not through the opposite heading at 180°.
+    yaw_valid = np.isfinite(yaw_arr)
+    yaw_arr[yaw_valid] = np.degrees(np.unwrap(np.radians(yaw_arr[yaw_valid])))
     baro_arr = _field(lambda s: s.baro_alt)
 
     results: list[TelemetrySample | None] = []
@@ -412,11 +415,14 @@ def parse_srt_string(text: str) -> tuple[list[TelemetrySample], dict]:
 # when no dedicated gimbal column exists (true for roll -- DJI/Airdata
 # exports a gimbal heading and pitch but not a gimbal roll).
 _ROLE_HEADER_PRIORITY: dict[str, tuple[str, ...]] = {
-    "lat": ("latitude", "lat"),
-    "lon": ("longitude", "long", "lon"),
-    "alt_msl": ("altitude_above_sealevel", "altitudeabovesealevel", "altitude", "abs_alt"),
+    "lat": ("latitude", "lat", "drone_lat"),
+    "lon": ("longitude", "long", "lon", "drone_lon"),
+    "alt_msl": ("altitude_above_sealevel", "altitudeabovesealevel", "altitude", "abs_alt", "drone_altitude_m"),
     "alt_rel": ("height_above_takeoff", "relative_altitude", "altitude_above_ground", "rel_alt", "height"),
-    "timestamp": ("time", "time_stamp", "timestamp", "elapsed_time"),
+    # Video-clock columns first: a per-frame export (one row per video
+    # frame, e.g. DJI_1001.csv) already counts seconds from video start,
+    # so the video-start offset is measured by construction, not guessed.
+    "timestamp": ("video_time_s", "video_time", "time", "time_stamp", "timestamp", "elapsed_time"),
     "gimbal_pitch": ("gimbal_pitch", "pitch"),
     "gimbal_roll": ("gimbal_roll", "roll"),
     "gimbal_yaw": ("gimbal_heading", "gimbal_yaw", "compass_heading"),
@@ -448,6 +454,9 @@ _CSV_QUALITY_LOOKUP = {"satellites": "satellites", "gpslevel": "gpslevel"}
 
 _FEET_UNIT_TOKENS = ("feet", "ft")
 
+# Timestamp headers whose clock is already the video's own clock.
+_VIDEO_CLOCK_HEADERS = frozenset({"video_time_s", "video_time"})
+
 _TRUTHY_FLAG_VALUES = {"1", "true", "yes", "y"}
 
 
@@ -463,6 +472,26 @@ def _normalize_header(raw_header: str) -> tuple[str, str | None]:
         return key, None
     name, unit = m.groups()
     return name, (unit.strip().lower() if unit else None)
+
+
+def _match_column_candidates(fieldnames: list[str]) -> dict[str, list[tuple[str, str | None]]]:
+    """Like ``_match_columns`` but keeps every present candidate, in priority order.
+
+    A per-row fallback needs this: an export can carry a ``timestamp``
+    column that is empty on every row next to a populated ``video_time_s``,
+    and a row must not be dropped just because the first-priority column
+    happens to be blank.
+    """
+    normalized: dict[str, tuple[str, str | None]] = {}
+    for raw_header in fieldnames:
+        name, unit = _normalize_header(raw_header)
+        if name not in normalized:
+            normalized[name] = (raw_header, unit)
+    return {
+        role: [normalized[c] for c in candidates if c in normalized]
+        for role, candidates in _ROLE_HEADER_PRIORITY.items()
+        if any(c in normalized for c in candidates)
+    }
 
 
 def _match_columns(fieldnames: list[str]) -> dict[str, tuple[str, str | None]]:
@@ -567,7 +596,10 @@ def _parse_csv(path: Path) -> tuple[list[TelemetrySample], dict]:
     if reader.fieldnames is None:
         return [], stats
 
-    columns = _match_columns(reader.fieldnames)
+    columns = _match_column_candidates(reader.fieldnames)
+    ts_candidates = columns.get("timestamp", [])
+    if ts_candidates and _normalize_header(ts_candidates[0][0])[0] in _VIDEO_CLOCK_HEADERS:
+        stats["time_base"] = "video"
 
     normalized_flags: dict[str, str] = {}
     normalized_quality: dict[str, str] = {}
@@ -595,9 +627,14 @@ def _parse_csv(path: Path) -> tuple[list[TelemetrySample], dict]:
         stats["records_total"] += 1
         try:
             values: dict[str, float] = {}
-            for role, (raw_header, unit) in columns.items():
-                raw_val = row.get(raw_header)
-                if raw_val is None or not str(raw_val).strip():
+            for role, candidates in columns.items():
+                raw_val, unit = None, None
+                for raw_header, cand_unit in candidates:
+                    cell = row.get(raw_header)
+                    if cell is not None and str(cell).strip():
+                        raw_val, unit = cell, cand_unit
+                        break
+                if raw_val is None:
                     continue
                 v = float(raw_val)
                 if role in ("alt_msl", "alt_rel") and unit and any(tok in unit for tok in _FEET_UNIT_TOKENS):
@@ -736,13 +773,16 @@ def _resolve_time_offset(
     """Decide the video-start offset per ``load_telemetry``'s documented precedence.
 
     Returns ``(offset_s, offset_source)``, ``offset_source`` one of
-    ``"explicit"``/``"isVideo_autodetect"``/``"assumed_zero"``. Logs a loud
+    ``"explicit"``/``"video_clock"``/``"isVideo_autodetect"``/``"assumed_zero"``. Logs a loud
     warning whenever it falls back to ``"assumed_zero"`` for a CSV (SRT/GPX
     genuinely default to 0.0 correctly -- see module docstring -- so those
     stay silent).
     """
     if time_offset_s is not None:
         return float(time_offset_s), "explicit"
+
+    if stats.get("time_base") == "video":
+        return 0.0, "video_clock"
 
     segments: list[VideoSegment] = stats.get("video_segments") or []
     fmt = stats.get("format")

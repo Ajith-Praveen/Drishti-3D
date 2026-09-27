@@ -356,6 +356,12 @@ def test_write_geotiff_uses_a_real_backend_when_one_is_available(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def test_missing_junction_residual_does_not_break_report():
+    report = build_report({"junction_residuals": [{"junction": 0, "rmse_m": None}]})
+    assert "not computed" in render_report_text(report)
+    assert "not computed" in render_report_html(report)
+
+
 def test_build_report_missing_keys_are_not_computed():
     report = build_report({})
     for key in (
@@ -506,3 +512,106 @@ def test_fbx_is_an_offered_bundle_format():
     # And every other required format is still there.
     for required in ("obj", "ply", "las", "glb"):
         assert required in _ALL_FORMATS
+
+
+def test_map_deliverables_are_written_in_utm_not_local_enu(tmp_path) -> None:
+    import json
+
+    import numpy as np
+    import pyproj
+    import rasterio
+
+    from drishti3d.export.bundle_export import export_all
+    from drishti3d.types import GeoPoint, PointCloud
+
+    origin = GeoPoint(lat=41.7716476, lon=-0.7458537, alt_msl=324.72)
+    rng = np.random.default_rng(0)
+    xyz = np.c_[rng.uniform(0, 200, 5000), rng.uniform(0, 200, 5000), rng.uniform(-1, 1, 5000)]
+    xyz[0] = [100.0, 0.0, 0.0]  # 100 m due east of the origin
+    pc = PointCloud(xyz=xyz, rgb=np.full((5000, 3), 128, np.uint8))
+
+    written = export_all(pc, tmp_path, formats={"las", "ply"}, crs="EPSG:32630", geo_origin=origin)
+
+    e0, n0 = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:32630", always_xy=True).transform(origin.lon, origin.lat)
+    import laspy
+
+    las = laspy.read(written["las"])
+    p = np.c_[las.x, las.y][0]
+    # 100 m east in ENU is ~100 m in UTM, rotated by the ~1.5 deg meridian convergence.
+    assert abs(np.hypot(p[0] - e0, p[1] - n0) - 100.0) < 0.2
+    assert abs(p[1] - n0) > 1.0  # the convergence rotation really was applied
+
+    with rasterio.open(written["dsm"]) as d:
+        assert d.crs.to_epsg() == 32630
+        assert d.bounds.left > 600000 and d.bounds.bottom > 4.6e6
+    assert json.loads((tmp_path / "georef.json").read_text())["map_crs"] == "EPSG:32630"
+
+
+def test_exported_dsm_leaves_unobserved_ground_empty(tmp_path):
+    """Nearest-neighbour fill across ground the camera never saw is invented height; only pinholes are filled."""
+    pytest.importorskip("rasterio")
+    import rasterio
+
+    from drishti3d.export import export_all
+
+    rng = np.random.default_rng(0)
+    # Two observed patches 60 m apart, nothing in between; a 1-cell pinhole inside the first patch.
+    a = np.c_[rng.uniform(0, 20, 4000), rng.uniform(0, 20, 4000), np.zeros(4000)]
+    b = np.c_[rng.uniform(80, 100, 4000), rng.uniform(0, 20, 4000), np.full(4000, 5.0)]
+    xyz = np.vstack([a, b])
+    written = export_all(PointCloud(xyz=xyz, rgb=np.full((len(xyz), 3), 100, np.uint8)), tmp_path, formats={"ply"})
+    with rasterio.open(written["dsm"]) as d:
+        dsm = d.read(1)
+    with rasterio.open(written["dsm_interpolated"]) as d:
+        interp = d.read(1)
+    cols = dsm.shape[1]
+    assert np.isnan(dsm[:, int(0.5 * cols)]).all()  # the unobserved middle stays nodata
+    assert np.isfinite(dsm[:, 2]).mean() > 0.9 and np.isfinite(dsm[:, -3]).mean() > 0.9
+    assert interp.max() <= 1 and not interp[:, int(0.5 * cols)].any()
+
+
+def test_true_ortho_raster_samples_the_texture_at_its_own_resolution():
+    """Vertices on a 0.5 m grid with a 3x texture: the orthomosaic keeps ~0.17 m texels and lands on the right ground."""
+    from drishti3d.export.bundle_export import _true_ortho_raster
+
+    ny, nx, up = 40, 60, 3
+    xs = 500000.0 + (np.arange(nx) + 0.5) * 0.5
+    ys = 4600000.0 - (np.arange(ny) + 0.5) * 0.5
+    X, Y = np.meshgrid(xs, ys)
+    rows, cols = np.mgrid[0:ny, 0:nx]
+    uv = np.c_[(cols.ravel() + 0.5) / nx, 1.0 - (rows.ravel() + 0.5) / ny]
+    texture = np.zeros((ny * up, nx * up, 3), np.uint8)
+    texture[:, : nx * up // 2] = (255, 0, 0)  # west half red
+    texture[:, nx * up // 2 :] = (0, 0, 255)  # east half blue
+    rgb, tr = _true_ortho_raster(np.c_[X.ravel(), Y.ravel(), np.zeros(X.size)], texture, uv)
+    assert abs(tr.pixel_size_x - 0.5 / up) < 1e-6 and tr.pixel_size_y < 0
+    h, w = rgb.shape[:2]
+    assert rgb[h // 2, w // 4, 0] == 255 and rgb[h // 2, 3 * w // 4, 2] == 255
+    # The red/blue boundary sits at the grid's middle easting.
+    mid_col = int(round((xs.mean() - (tr.x_origin - tr.pixel_size_x / 2)) / tr.pixel_size_x))
+    assert rgb[h // 2, mid_col - 3, 0] == 255 and rgb[h // 2, mid_col + 3, 2] == 255
+
+
+def test_las_carries_per_point_height_uncertainty(tmp_path):
+    from drishti3d.export.formats import export_las
+
+    n = 50
+    sigma = np.linspace(0.05, 2.5, n).astype(np.float32)
+    sigma[:3] = np.nan  # inferred points stay NaN, not a made-up number
+    pc = PointCloud(
+        xyz=np.random.default_rng(0).uniform(0, 10, (n, 3)),
+        confidence=np.full(n, int(Confidence.MEASURED), np.uint8),
+        uncertainty_m=sigma,
+    )
+    export_las(tmp_path / "m.las", pc)
+    got = np.asarray(laspy.read(tmp_path / "m.las").height_uncertainty_m)
+    assert np.isnan(got[:3]).all() and np.allclose(got[3:], sigma[3:])
+
+
+def test_pipeline_result_round_trips_uncertainty(tmp_path):
+    from drishti3d.pipeline.result import PipelineResult
+
+    pc = PointCloud(xyz=np.zeros((4, 3)), uncertainty_m=np.array([0.1, 0.2, np.nan, 1.5], np.float32))
+    PipelineResult(point_cloud=pc).save(tmp_path / "r")
+    back = PipelineResult.load(tmp_path / "r").point_cloud.uncertainty_m
+    assert np.allclose(back[[0, 1, 3]], [0.1, 0.2, 1.5]) and np.isnan(back[2])

@@ -11,7 +11,7 @@ from drishti3d.geometry.yaw_from_flow import estimate_yaw_from_flow, yaw_for_pai
 from drishti3d.types import CameraIntrinsics
 
 
-def _render(yaw_deg: float, heading_deg: float, n: int = 3, altitude: float = 120.0, step: float = 20.0, w=640, h=400, seed=0):
+def _render(yaw_deg: float, heading_deg: float, n: int = 3, altitude: float = 120.0, step: float = 20.0, w=640, h=400, seed=0, yaw_step=0):
     """Nadir camera at ``yaw_deg`` flying along compass ``heading_deg`` over a textured plane."""
     rng = np.random.default_rng(seed)
     intr = CameraIntrinsics.from_hfov(70.0, w, h)
@@ -24,6 +24,7 @@ def _render(yaw_deg: float, heading_deg: float, n: int = 3, altitude: float = 12
     d = np.array([np.sin(hdg), np.cos(hdg), 0.0]) * step  # ENU: x=E, y=N
     images, positions = [], []
     for i in range(n):
+        R = gimbal_to_R(yaw_deg + i * yaw_step, -90.0, 0.0)
         C = np.array([0.0, 0.0, altitude]) + i * d
         r_cw = R.T
         t_cw = -r_cw @ C
@@ -52,6 +53,14 @@ def test_stationary_pair_is_refused():
     images, positions = _render(30.0, 90.0, step=0.5)
     est, diag = yaw_for_pair(images[0], images[1], positions[1] - positions[0], -90.0, 0.0)
     assert est is None and "displacement" in diag["failure"]
+
+
+def test_turning_camera_estimates_each_frames_own_heading():
+    images, positions = _render(30, 80, yaw_step=20)
+    yaws, diag = estimate_yaw_from_flow(images, positions, [-90.] * 3, [0.] * 3, [None] * 3)
+    assert diag["from_flow"] == 3
+    for actual, expected in zip(yaws, [30, 50, 70], strict=True):
+        assert abs((actual - expected + 180) % 360 - 180) < 2
 
 
 def test_estimate_falls_back_to_telemetry_where_unmeasurable():

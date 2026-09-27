@@ -87,6 +87,9 @@ _CELL_M = 2.0
 #: Cells with fewer points than this are ignored -- a thickness computed
 #: from three points is noise, not a measurement.
 _MIN_CELL_POINTS = 30
+#: Points one window needs inside an overlap cell for its median height
+#: there to count (a shared cell splits its points between windows).
+_MIN_OVERLAP_POINTS = 8
 
 #: A cell counts as flat when its own p5-p95 Z span, measured from the
 #: single best-placed submap in it, is below this. Cells failing it may
@@ -99,6 +102,35 @@ _FLAT_CELL_SPAN_M = 1.5
 #: merge that scatters submaps further than this cannot meet it no matter
 #: how good the fusion is.
 _SPREAD_FAIL_M = 1.0
+
+#: With a single submap there is no cross-window spread to measure, so the
+#: verdict falls back to where the ground sits against the GPS ground and
+#: how thick flat ground came out. The GPS threshold is looser than the
+#: spread one because the GPS ground itself carries standalone-GPS
+#: vertical error (a few metres); a flat-ground slab thicker than two
+#: metres is a depth problem whatever the GPS says.
+_GPS_GROUND_FAIL_M = 5.0
+_FLAT_THICKNESS_FAIL_M = 2.0
+
+#: The "GPS ground" is the takeoff height (``camera_Z - alt_rel``), which is
+#: only where the ground is while the terrain stays level with the launch
+#: point: on PinPoint flight01 the ground under a 20 s clip sits 4-15 m
+#: below takeoff, so a correctly placed window "failed" by 8.5 m. When the
+#: image-derived bundle-adjustment points exist in the dense cloud's own
+#: frame they are the reference instead, compared cell by cell on this
+#: grid (BA points are sparse, so the cells are coarse), with at least
+#: this many reference points per cell.
+_REFERENCE_CELL_M = 10.0
+_REFERENCE_MIN_POINTS = 5
+_REFERENCE_GROUND_FAIL_M = 5.0
+
+#: Without that reference the takeoff height is all there is, and it is an
+#: assumption, not a measurement: terrain inside a survey routinely sits
+#: 10-20 m off the launch point. Its tolerance therefore grows with the
+#: flight height -- still catching a window whose depth scale is wrong by
+#: tens of percent (the failure this check exists for), no longer failing
+#: correct geometry over hilly ground.
+_TAKEOFF_RELIEF_FRACTION = 0.25
 
 #: Distinct hues for per-submap colouring, BGR. Chosen to stay
 #: distinguishable at one-pixel splat size.
@@ -123,28 +155,90 @@ class PlacementReport:
         return self.metrics.get("ground_spread_m")
 
     @property
-    def passed(self) -> bool:
-        """True when submaps agree on where the ground is to within a metre."""
+    def verdict(self) -> str:
+        """``"PASS"``, ``"FAIL"`` or ``"UNMEASURED"``.
+
+        Several submaps: they must agree on the ground to within a metre.
+        One submap: its ground must sit within ``_GPS_GROUND_FAIL_M`` of the
+        GPS ground and flat ground must be thinner than
+        ``_FLAT_THICKNESS_FAIL_M``. Nothing measurable is ``UNMEASURED`` --
+        not a failure, and never silently a pass.
+        """
+        if self.metrics.get("forward_view"):
+            # A level, forward camera sees the ground at grazing angles and its
+            # solved points sit on canopy and walls, not ground: the test is
+            # whether the dense surface passes through those points in 3D.
+            d, lim = self.metrics.get("ba_to_dense_median_m"), self.metrics.get("ba_to_dense_limit_m")
+            if d is None or lim is None:
+                return "UNMEASURED"
+            return "PASS" if d <= lim else "FAIL"
         spread = self.ground_spread_m
-        return spread is not None and spread <= _SPREAD_FAIL_M
+        ref_err = self.metrics.get("reference_ground_error_median_m")
+        if spread is not None:
+            if spread > _SPREAD_FAIL_M:
+                return "FAIL"
+            # Windows can agree with each other and still all sit off the
+            # image-derived ground (one shared depth-scale error).
+            if ref_err is not None and abs(ref_err) > _REFERENCE_GROUND_FAIL_M:
+                return "FAIL"
+            return "PASS"
+        if ref_err is not None:
+            err, limit = ref_err, _REFERENCE_GROUND_FAIL_M
+        else:
+            err, limit = self.metrics.get("gps_ground_error_median_m"), self.gps_ground_threshold_m
+        if err is None:
+            return "UNMEASURED"
+        thick = self.metrics.get("flat_thickness_median_m")
+        if abs(err) > limit or (thick is not None and thick > _FLAT_THICKNESS_FAIL_M):
+            return "FAIL"
+        return "PASS"
+
+    @property
+    def gps_ground_threshold_m(self) -> float:
+        """Tolerance against the takeoff-height ground: 5 m, or a quarter of the height above it."""
+        agl = self.metrics.get("gps_agl_m")
+        if agl:
+            return max(_GPS_GROUND_FAIL_M, _TAKEOFF_RELIEF_FRACTION * float(agl))
+        return _GPS_GROUND_FAIL_M
+
+    @property
+    def passed(self) -> bool:
+        """True only for a measured PASS (see ``verdict``)."""
+        return self.verdict == "PASS"
 
     def summary(self) -> str:
         m = self.metrics
         spread = m.get("ground_spread_m")
         thick = m.get("flat_thickness_median_m")
         err = m.get("gps_ground_error_median_m")
+        ref_err = m.get("reference_ground_error_median_m")
         parts = [
             f"{m.get('n_submaps', 0)} submaps",
             f"ground spread {spread:.2f} m" if spread is not None else "ground spread n/a",
             f"flat thickness {thick:.2f} m" if thick is not None else "flat thickness n/a",
         ]
-        if err is not None:
+        if m.get("forward_view") and m.get("ba_to_dense_median_m") is not None:
+            parts.append(
+                f"forward view: solved points to dense surface median {m['ba_to_dense_median_m']:.2f} m "
+                f"(limit {m.get('ba_to_dense_limit_m', float('nan')):.2f} m)"
+            )
+        elif ref_err is not None:
+            parts.append(f"vs {m.get('reference_ground_source', 'reference')} ground {ref_err:+.2f} m")
+        elif err is not None:
             parts.append(f"vs GPS ground {err:+.2f} m")
-        parts.append("PASS" if self.passed else f"FAIL (>{_SPREAD_FAIL_M:.0f} m)")
+        parts.append(self.verdict)
         return "; ".join(parts)
 
     def as_dict(self) -> dict:
-        return {**self.metrics, "passed": self.passed, "spread_threshold_m": _SPREAD_FAIL_M}
+        return {
+            **self.metrics,
+            "passed": self.passed,
+            "verdict": self.verdict,
+            "spread_threshold_m": _SPREAD_FAIL_M,
+            "gps_ground_threshold_m": round(self.gps_ground_threshold_m, 3),
+            "reference_ground_threshold_m": _REFERENCE_GROUND_FAIL_M,
+            "flat_thickness_threshold_m": _FLAT_THICKNESS_FAIL_M,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -212,18 +306,111 @@ def _flat_cell_mask(spans: np.ndarray, counts: np.ndarray) -> np.ndarray:
     return enough & (spans <= threshold)
 
 
+def _overlap_disagreement(xyz: np.ndarray, labels: np.ndarray, cell_m: float) -> dict:
+    """How far apart windows put the ground WHERE THEY OVERLAP.
+
+    Per cell, every window with enough points gets its own median height;
+    the cell's disagreement is the range of those medians. Only cells two
+    or more windows reach count, so terrain relief between windows that
+    never see the same ground is not mistaken for placement error (a 4 km
+    loop spans tens of metres of real relief). The cell grows with the
+    area/point ratio so a sparse cloud still gets enough points per cell.
+    """
+    n = xyz.shape[0]
+    area = float(np.ptp(xyz[:, 0]) * np.ptp(xyz[:, 1])) if n else 0.0
+    cell = float(max(cell_m, min(25.0, np.sqrt(area * 4 * _MIN_CELL_POINTS / max(n, 1)))))
+    empty = {"cell_m": round(cell, 2), "cells": 0, "median_m": None, "p90_m": None}
+    if n == 0 or labels.max(initial=0) < 1:
+        return empty
+    _key, cell_idx = _cell_ids(xyz[:, :2], cell)
+    group = cell_idx.astype(np.int64) * (int(labels.max()) + 1) + labels
+    uniq, inv, counts = np.unique(group, return_inverse=True, return_counts=True)
+    order = np.argsort(inv, kind="stable")
+    z_sorted = xyz[order, 2]
+    starts = np.concatenate([[0], np.cumsum(counts)[:-1]])
+    medians = np.array([np.median(z_sorted[a : a + c]) for a, c in zip(starts, counts, strict=True)])
+    ok = counts >= _MIN_OVERLAP_POINTS
+    cells_of_group = uniq // (int(labels.max()) + 1)
+    cu, cinv = np.unique(cells_of_group[ok], return_inverse=True)
+    if cu.size == 0:
+        return empty
+    zmax = np.full(cu.size, -np.inf)
+    zmin = np.full(cu.size, np.inf)
+    np.maximum.at(zmax, cinv, medians[ok])
+    np.minimum.at(zmin, cinv, medians[ok])
+    nwin = np.bincount(cinv)
+    shared = nwin >= 2
+    if not shared.any():
+        return empty
+    ranges = (zmax - zmin)[shared]
+    return {
+        "cell_m": round(cell, 2),
+        "cells": int(shared.sum()),
+        "median_m": float(np.median(ranges)),
+        "p90_m": round(float(np.percentile(ranges, 90)), 3),
+    }
+
+
+def _reference_ground_errors(
+    xyz: np.ndarray, labels: np.ndarray, reference: np.ndarray, cell_m: float = _REFERENCE_CELL_M
+) -> tuple[dict[int, float], int]:
+    """Per submap: median over shared cells of (its ground - the reference's ground).
+
+    Both grounds are the same low percentile of height inside each cell, so
+    trees and roofs bias the two the same way. Returns the per-submap
+    errors and how many reference cells were usable.
+    """
+    ref = np.asarray(reference, dtype=np.float64).reshape(-1, 3)
+    ref = ref[np.isfinite(ref).all(axis=1)]
+    if ref.shape[0] < _REFERENCE_MIN_POINTS:
+        return {}, 0
+    ref_key, ref_idx = _cell_ids(ref[:, :2], cell_m)
+    n_ref = int(ref_idx.max()) + 1
+    ref_ground = _per_group_percentiles(ref[:, 2], ref_idx, n_ref, (_GROUND_PCTL,))[:, 0]
+    ref_counts = np.bincount(ref_idx, minlength=n_ref)
+    uniq_ref = np.unique(ref_key)
+    usable = ref_counts >= _REFERENCE_MIN_POINTS
+    lookup = dict(zip(uniq_ref[usable].tolist(), ref_ground[usable].tolist(), strict=True))
+    if not lookup:
+        return {}, 0
+
+    errors: dict[int, float] = {}
+    for s in np.unique(labels):
+        sel = labels == s
+        if int(sel.sum()) < _MIN_CELL_POINTS:
+            continue
+        key, idx = _cell_ids(xyz[sel, :2], cell_m)
+        n = int(idx.max()) + 1
+        ground = _per_group_percentiles(xyz[sel, 2], idx, n, (_GROUND_PCTL,))[:, 0]
+        counts = np.bincount(idx, minlength=n)
+        diffs = [
+            g - lookup[k]
+            for k, g, c in zip(np.unique(key).tolist(), ground.tolist(), counts.tolist(), strict=True)
+            if c >= _MIN_CELL_POINTS and k in lookup
+        ]
+        if diffs:
+            errors[int(s)] = float(np.median(diffs))
+    return errors, len(lookup)
+
+
 def placement_metrics(
     xyz: np.ndarray,
     labels: np.ndarray,
     *,
     gps_ground_z: float | None = None,
+    gps_agl_m: float | None = None,
+    reference_ground: np.ndarray | None = None,
+    reference_source: str = "reference",
     cell_m: float = _CELL_M,
 ) -> PlacementReport:
-    """Measure whether the per-submap placements agree with each other and GPS.
+    """Measure whether the per-submap placements agree with each other and the ground.
 
     ``labels`` is a per-point submap index, parallel to ``xyz``. Passing
     an all-zero label array measures the cloud as a whole (thickness only,
-    no cross-submap spread).
+    no cross-submap spread). ``reference_ground`` is an optional (M, 3)
+    point set in the SAME frame (the bundle-adjustment points), compared
+    cell by cell; when it yields a measurement it takes over from the
+    takeoff-height ``gps_ground_z`` in the verdict.
     """
     xyz = np.asarray(xyz, dtype=np.float64).reshape(-1, 3)
     labels = np.asarray(labels).reshape(-1).astype(np.int64)
@@ -244,7 +431,13 @@ def placement_metrics(
         ground_by_submap[s] = float(np.percentile(z[sel], _GROUND_PCTL))
 
     grounds = np.array(list(ground_by_submap.values()), dtype=np.float64)
-    ground_spread = float(grounds.max() - grounds.min()) if grounds.size >= 2 else None
+    # Whole-flight spread of per-window ground: only meaningful when every
+    # window images the same ground (a short strip). Kept for reference;
+    # the verdict uses the overlap measure below.
+    global_spread = float(grounds.max() - grounds.min()) if grounds.size >= 2 else None
+    overlap = _overlap_disagreement(xyz, labels, cell_m)
+    # Windows that never share a cell leave only the whole-flight number.
+    ground_spread = overlap["median_m"] if overlap["cells"] else global_spread
 
     # Per-cell vertical span. On a correct reconstruction of flat ground
     # this is a few centimetres of noise; on a stacked one it is the gap
@@ -281,6 +474,10 @@ def placement_metrics(
         # make a saved run unequal to the run that produced it.
         "ground_z_by_submap": {str(k): round(v, 3) for k, v in sorted(ground_by_submap.items())},
         "ground_spread_m": None if ground_spread is None else round(ground_spread, 3),
+        "ground_spread_global_m": None if global_spread is None else round(global_spread, 3),
+        "overlap_cell_m": overlap["cell_m"],
+        "overlap_cells": overlap["cells"],
+        "overlap_p90_m": overlap["p90_m"],
         "cell_m": cell_m,
         "cells_measured": int(all_cells.sum()),
         "cells_flat": int(flat.sum()),
@@ -296,12 +493,26 @@ def placement_metrics(
 
     if gps_ground_z is not None:
         metrics["gps_ground_z_m"] = round(float(gps_ground_z), 3)
+        if gps_agl_m:
+            metrics["gps_agl_m"] = round(float(gps_agl_m), 2)
         if grounds.size:
             errors = grounds - float(gps_ground_z)
             metrics["gps_ground_error_median_m"] = round(float(np.median(errors)), 3)
             metrics["gps_ground_error_max_abs_m"] = round(float(np.max(np.abs(errors))), 3)
             metrics["gps_ground_error_by_submap"] = {
                 str(k): round(v - float(gps_ground_z), 3) for k, v in sorted(ground_by_submap.items())
+            }
+
+    if reference_ground is not None:
+        ref_errors, ref_cells = _reference_ground_errors(xyz, labels, reference_ground)
+        if ref_errors:
+            values = np.array(list(ref_errors.values()), dtype=np.float64)
+            metrics["reference_ground_source"] = reference_source
+            metrics["reference_ground_cells"] = ref_cells
+            metrics["reference_ground_error_median_m"] = round(float(np.median(values)), 3)
+            metrics["reference_ground_error_max_abs_m"] = round(float(np.max(np.abs(values))), 3)
+            metrics["reference_ground_error_by_submap"] = {
+                str(k): round(v, 3) for k, v in sorted(ref_errors.items())
             }
 
     return PlacementReport(metrics)
@@ -443,7 +654,11 @@ def write_placement_check(
     labels: np.ndarray,
     *,
     gps_ground_z: float | None = None,
+    gps_agl_m: float | None = None,
+    reference_ground: np.ndarray | None = None,
+    reference_source: str = "reference",
     camera_positions: np.ndarray | None = None,
+    cell_m: float = _CELL_M,
     max_points: int = 1_500_000,
     size: int = _PANEL_SIZE,
 ) -> PlacementReport:
@@ -453,11 +668,9 @@ def write_placement_check(
     ``placement_elevation_y.png``, a combined ``placement_check.png``
     sheet, and ``placement.json`` with the metrics.
 
-    The point cloud is subsampled to ``max_points`` for rendering and
-    measurement alike -- both are statistical, and at several million
-    points the sort in ``_per_group_percentiles`` starts to cost real
-    seconds against a stage whose whole purpose is to be cheap enough to
-    run before the expensive one.
+    Measurements retain complete spatial cells when subsampling. Striding
+    individual mesh vertices removes the ground cells' statistical support
+    and biases the thickness test toward densely sampled vertical walls.
     """
     out_dir = Path(out_dir)
     xyz = np.asarray(xyz, dtype=np.float64).reshape(-1, 3)
@@ -466,14 +679,32 @@ def write_placement_check(
     if xyz.shape[0] == 0 or labels.shape[0] != xyz.shape[0]:
         return PlacementReport({"n_points": int(xyz.shape[0]), "n_submaps": 0})
 
+    original_count = len(xyz)
     if xyz.shape[0] > max_points:
-        # Deterministic stride, not a random draw: the same cloud must
-        # produce the same report twice, or the numbers cannot be compared
-        # between runs.
         step = int(np.ceil(xyz.shape[0] / max_points))
-        xyz, labels = xyz[::step], labels[::step]
+        grid = np.floor(xyz[:, :2] / cell_m).astype(np.int64)
+        cell_hash = (grid[:, 0] * 73856093) ^ (grid[:, 1] * 19349663)
+        keep = np.remainder(cell_hash, step) == 0
+        if not keep.any():
+            keep = cell_hash == cell_hash[0]
+        xyz, labels = xyz[keep], labels[keep]
 
-    report = placement_metrics(xyz, labels, gps_ground_z=gps_ground_z)
+    report = placement_metrics(
+        xyz,
+        labels,
+        gps_ground_z=gps_ground_z,
+        gps_agl_m=gps_agl_m,
+        reference_ground=reference_ground,
+        reference_source=reference_source,
+        cell_m=cell_m,
+    )
+    report.metrics["input_points"] = original_count
+    report.metrics["sampling"] = "complete_spatial_cells"
+
+    # Rendering may use a point stride after the measurements are complete.
+    if len(xyz) > max_points:
+        step = int(np.ceil(len(xyz) / max_points))
+        xyz, labels = xyz[::step], labels[::step]
 
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -510,6 +741,13 @@ def write_placement_check(
                 f"submaps median {m.get('gps_ground_error_median_m', float('nan')):+.2f} m, "
                 f"worst {m.get('gps_ground_error_max_abs_m', float('nan')):.2f} m"
             )
+        if m.get("reference_ground_error_median_m") is not None:
+            lines.append(
+                f"vs {m['reference_ground_source']} ground ({m['reference_ground_cells']} cells of "
+                f"{_REFERENCE_CELL_M:g} m): submaps median {m['reference_ground_error_median_m']:+.2f} m, "
+                f"worst {m['reference_ground_error_max_abs_m']:.2f} m -- this, not the takeoff height, "
+                "decides the verdict"
+            )
         lines.append("colour = submap index. one ground line = correct. repeated lines = stacked windows.")
 
         panels = [p for p in (
@@ -530,7 +768,7 @@ def write_placement_check(
     except Exception:
         logger.warning("placement: writing the placement check failed; continuing", exc_info=True)
 
-    level = logger.info if report.passed else logger.warning
+    level = logger.warning if report.verdict == "FAIL" else logger.info
     level("=" * 78)
     level("PLACEMENT CHECK: %s", report.summary())
     level("  renders in %s (see placement_check.png -- elevation panels show vertical error)", out_dir)

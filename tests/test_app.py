@@ -1,11 +1,27 @@
-"""Headless tests for the DRISHTI-3D desktop app shell.
+"""Tests for the DRISHTI-3D desktop app shell.
 
-Run with QT_QPA_PLATFORM=offscreen so no real display is required.
+On Linux CI, run with QT_QPA_PLATFORM=offscreen so no real display is
+required. On macOS use the default (cocoa) platform: VTK's
+QVTKRenderWindowInteractor segfaults while creating its OpenGL context
+under the offscreen platform (VTK 9.7 / PySide6 6.11), which kills the
+whole pytest process instead of failing one test, so this module skips
+itself in that combination.
 """
 
 from __future__ import annotations
 
+import os
+import sys
+
 import numpy as np
+import pytest
+
+if sys.platform == "darwin" and os.environ.get("QT_QPA_PLATFORM") == "offscreen":
+    pytest.skip(
+        "VTK's Qt render window segfaults under QT_QPA_PLATFORM=offscreen on macOS; "
+        "run these tests with the default cocoa platform",
+        allow_module_level=True,
+    )
 
 from drishti3d.app.main_window import MainWindow
 from drishti3d.app.viewport import Viewport
@@ -85,7 +101,7 @@ def test_demo_pipeline_emits_monotonic_progress_and_varied_confidence():
 
 
 def test_pipeline_worker_emits_failed_not_raise(qtbot):
-    def bad_pipeline(report_progress, report_stage, report_partial, cancel_token):
+    def bad_pipeline(report_progress, report_stage, report_partial, cancel_token, report_preview=None):
         raise RuntimeError("boom")
 
     worker = PipelineWorker(bad_pipeline)
@@ -102,7 +118,7 @@ def test_pipeline_worker_emits_failed_not_raise(qtbot):
 
 
 def test_pipeline_worker_emits_finished_on_success(qtbot):
-    def good_pipeline(report_progress, report_stage, report_partial, cancel_token):
+    def good_pipeline(report_progress, report_stage, report_partial, cancel_token, report_preview=None):
         report_progress(1, 1, "done")
         return {"ok": True}
 
@@ -173,3 +189,133 @@ def test_mesh_detail_note_reports_the_chosen_budgets(qtbot):
     note = panel.mesh_note.text()
     assert "8M faces" in note
     assert "16M voxels" in note
+
+
+def _grid_mesh(n: int):
+    X, Y = np.meshgrid(np.arange(n, dtype=float), np.arange(n, dtype=float))
+    verts = np.c_[X.ravel(), Y.ravel(), 0.1 * X.ravel()]
+    idx = np.arange(n * n).reshape(n, n)
+    a, b, c, d = idx[:-1, :-1].ravel(), idx[:-1, 1:].ravel(), idx[1:, :-1].ravel(), idx[1:, 1:].ravel()
+    return verts, np.concatenate([np.c_[a, c, b], np.c_[b, c, d]])
+
+
+def test_mesh_uncertainty_heatmap_and_motion_proxy(qtbot, monkeypatch):
+    import drishti3d.app.viewport as vp
+
+    monkeypatch.setattr(vp, "MESH_PROXY_FACES", 100)
+    monkeypatch.setattr(vp, "MESH_PROXY_VERTICES", 60)
+    viewport = Viewport()
+    qtbot.addWidget(viewport)
+    verts, faces = _grid_mesh(40)
+    sigma = np.linspace(0.0, 3.0, len(verts)).astype(np.float32)
+    sigma[:10] = np.nan  # inferred
+    conf = np.full(len(verts), int(Confidence.MEASURED), dtype=np.uint8)
+    viewport.set_mesh(verts, faces, None, confidence=conf, uncertainty_m=sigma)
+
+    viewport.set_color_mode("uncertainty")
+    data = viewport._mesh_polydata.GetPointData()
+    assert data.GetScalars().GetName() == "uncertainty"
+    assert np.isnan(data.GetArray("uncertainty").GetValue(0))
+    assert "(m)" in viewport._scalar_bar.GetTitle()  # metres, not the tier legend
+    viewport.set_color_mode("confidence")
+    assert data.GetScalars().GetName() == "confidence"
+
+    proxy = viewport._proxy_polydata
+    assert proxy is not None and 0 < proxy.GetNumberOfPolys() < len(faces)
+    assert proxy.GetPointData().GetArray("uncertainty") is not None
+    viewport._proxy_begin()
+    assert viewport._proxy_actor.GetVisibility() and not viewport._mesh_actor.GetVisibility()
+    viewport._proxy_end()
+    assert viewport._mesh_actor.GetVisibility() and not viewport._proxy_actor.GetVisibility()
+
+
+def test_navigation_redraws_and_keeps_the_horizon_level(qtbot):
+    """Camera moves must reach the screen (the RenderEvent used to go nowhere) and orbit about +Z."""
+    from vtkmodules.vtkInteractionStyle import vtkInteractorStyleTerrain
+
+    viewport = Viewport()
+    qtbot.addWidget(viewport)
+    assert isinstance(viewport.interactor.GetInteractorStyle(), vtkInteractorStyleTerrain)
+    assert viewport.interactor.HasObserver("RenderEvent")
+    viewport.set_point_cloud(_make_point_cloud())
+    for name in ("top", "iso", "front"):
+        viewport.set_view(name)
+        assert viewport.renderer.GetActiveCamera().GetViewUp()[2] > 0.99
+    before = viewport.renderer.GetActiveCamera().GetDistance()
+    viewport._wheel_zoom(1.1)
+    assert viewport.renderer.GetActiveCamera().GetDistance() < before
+
+
+def test_cluster_mesh_keeps_vertex_identity():
+    from drishti3d.app.viewport import _cluster_mesh
+
+    verts, faces = _grid_mesh(60)
+    keep, proxy = _cluster_mesh(verts, faces, 200)
+    assert len(keep) < len(verts) and proxy.max() < len(keep)
+    assert len(np.unique(keep)) == len(keep) and keep.max() < len(verts)
+
+
+def test_export_model_writes_every_offered_format(qtbot, tmp_path, monkeypatch):
+    """File > Export Model must work for each format in its dialog (OBJ and GLB used to raise)."""
+    from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+    from drishti3d.pipeline.result import PipelineResult
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    verts, faces = _grid_mesh(10)
+    pc = PointCloud(xyz=verts, rgb=np.full((len(verts), 3), 120, np.uint8),
+                    confidence=np.full(len(verts), int(Confidence.MEASURED), np.uint8))
+    window._last_result = PipelineResult(point_cloud=pc, mesh_faces=faces)
+    errors = []
+    monkeypatch.setattr(QMessageBox, "critical", lambda *a, **k: errors.append(a[2] if len(a) > 2 else a))
+    for ext in (".ply", ".las", ".obj", ".glb", ".xyz"):
+        target = tmp_path / f"model{ext}"
+        monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, t=target, **k: (str(t), ""))
+        window._export_model()
+        written = list(tmp_path.glob(f"model*{ext}"))
+        assert written and written[0].stat().st_size > 0, (ext, errors)
+    assert not errors, errors
+
+
+def test_viewport_measures_volume_profile_and_point_on_the_surface(qtbot):
+    """Volume / profile / point tools read the loaded surface; heights are reported as elevations."""
+    from drishti3d.app.viewport import Viewport
+
+    v = Viewport()
+    qtbot.addWidget(v)
+    x, y = np.meshgrid(np.arange(0.0, 40.0, 0.5), np.arange(0.0, 40.0, 0.5))
+    z = np.where((np.abs(x - 20) < 5) & (np.abs(y - 20) < 5), 3.0, 0.0)  # a 3 m block on flat ground
+    verts = np.c_[x.ravel(), y.ravel(), z.ravel() - 288.0]
+    nx = x.shape[1]
+    faces = []
+    for r in range(x.shape[0] - 1):
+        for c in range(nx - 1):
+            a, b, cc, d = r * nx + c, r * nx + c + 1, (r + 1) * nx + c, (r + 1) * nx + c + 1
+            faces += [[a, b, cc], [b, d, cc]]
+    v.set_height_datum(445.6)
+    v.set_mesh(verts, np.array(faces))
+    done = []
+    v.measurementCompleted.connect(done.append)
+
+    v.start_measurement("volume")
+    for corner in ((12, 12), (28, 12), (28, 28), (12, 28)):
+        v.add_measurement_point([corner[0], corner[1], -288.0])
+    v.finish_measurement()
+    vol = done[-1]
+    assert vol.kind == "volume" and vol.extra["above_m3"] == pytest.approx(3.0 * 9.5**2, rel=0.12)
+
+    v.start_measurement("profile")
+    v.add_measurement_point([2.0, 20.0, -288.0])
+    v.add_measurement_point([38.0, 20.0, -288.0])
+    v.finish_measurement()
+    prof = done[-1]
+    assert prof.extra["max_elevation_m"] == pytest.approx(445.6 - 288.0 + 3.0, abs=0.05)
+    assert prof.extra["climb_m"] == pytest.approx(3.0, abs=0.3)
+
+    v.start_measurement("point")
+    v.add_measurement_point([5.0, 5.0, -288.0])  # finishes by itself
+    assert done[-1].value == pytest.approx(157.6)
+    assert v.measurement_count() == 3
+    v.clear_measurements()
+    assert v.measurement_count() == 0 and v.measuring() is None

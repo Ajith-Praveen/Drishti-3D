@@ -49,6 +49,29 @@ _ROTATION_TO_CV2 = {
 }
 
 
+class LazyFrame:
+    """A decoded frame whose pixels are converted only when asked for (see ``VideoSource.iter_frames_lazy``)."""
+
+    __slots__ = ("index", "timestamp", "_frame", "_source")
+
+    def __init__(self, index: int, timestamp: float, frame: av.VideoFrame, source: VideoSource) -> None:
+        self.index = index
+        self.timestamp = timestamp
+        self._frame = frame
+        self._source = source
+
+    def small(self, downscale: int | None) -> Frame:
+        """The same ``Frame`` ``iter_frames(downscale=...)`` would have yielded for this index."""
+        image = self._source._to_upright_bgr(self._frame)
+        if downscale is not None:
+            image = downscale_image(image, downscale)
+        return Frame(index=self.index, timestamp=self.timestamp, image=image)
+
+    def bgr24(self) -> np.ndarray:
+        """Native-resolution BGR exactly as ``pipeline.framecache`` decodes it."""
+        return self._frame.to_ndarray(format="bgr24")
+
+
 def downscale_image(image: np.ndarray, max_long_side: int) -> np.ndarray:
     """Shrink (never enlarge) ``image`` so its longer side is <= ``max_long_side``.
 
@@ -105,10 +128,30 @@ class VideoSource:
 
         self._duration = self._detect_duration()
         self._frame_count = self._detect_frame_count()
+        self._undistort_maps: tuple[np.ndarray, np.ndarray] | None = None
 
         # The rotation probe above may have decoded a frame; rewind so the
         # first real call to iter_frames()/read_frames() starts from zero.
         self._container.seek(0, stream=self._stream, backward=True)
+
+    def set_undistortion(self, K: np.ndarray | None, dist_coeffs: np.ndarray | None) -> None:
+        """Remove lens distortion from every frame decoded from now on.
+
+        ``K`` is the 3x3 camera matrix at the upright native resolution and
+        stays the camera matrix of the undistorted frames (same size, same
+        principal point), so downstream pinhole code keeps ``K`` and drops
+        ``dist_coeffs``. ``None`` switches undistortion off.
+        """
+        if K is None or dist_coeffs is None or not np.any(np.asarray(dist_coeffs)):
+            self._undistort_maps = None
+            return
+        K = np.asarray(K, dtype=np.float64)
+        dist = np.asarray(dist_coeffs, dtype=np.float64).reshape(-1)
+        self._undistort_maps = cv2.initUndistortRectifyMap(K, dist, None, K, (self._width, self._height), cv2.CV_16SC2)
+
+    @property
+    def undistorting(self) -> bool:
+        return self._undistort_maps is not None
 
     # -- construction-time probing --------------------------------------
 
@@ -203,6 +246,8 @@ class VideoSource:
         code = _ROTATION_TO_CV2.get(self._rotation)
         if code is not None:
             image = cv2.rotate(image, code)
+        if self._undistort_maps is not None and image.shape[:2] == (self._height, self._width):
+            image = cv2.remap(image, *self._undistort_maps, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
         return image
 
     def _frame_timestamp(self, frame: av.VideoFrame, decode_index: int) -> float:
@@ -264,6 +309,19 @@ class VideoSource:
 
             yield Frame(index=decode_index, timestamp=timestamp, image=image)
             yielded += 1
+
+    def iter_frames_lazy(self) -> Iterator[LazyFrame]:
+        """Stream-decode every frame, deferring all pixel work until a caller asks for it.
+
+        Decoding cannot be skipped (inter-frame references), but the colour
+        conversion, rotation and resize that ``iter_frames`` does for every
+        frame can: a GPS-driven keyframe scan only needs pixels for the few
+        frames around each trigger. Each ``LazyFrame`` holds its decoded
+        ``av.VideoFrame`` and converts on demand.
+        """
+        self._container.seek(0, stream=self._stream, backward=True)
+        for decode_index, frame in enumerate(self._container.decode(self._stream)):
+            yield LazyFrame(decode_index, self._frame_timestamp(frame, decode_index), frame, self)
 
     def _estimate_decode_index(self, frame: av.VideoFrame, fps: float, previous: int | None) -> int:
         """Estimate a decoded frame's position in the original decode-order sequence.

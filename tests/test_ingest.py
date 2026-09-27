@@ -10,6 +10,7 @@ from itertools import pairwise
 from pathlib import Path
 
 import av
+import cv2
 import numpy as np
 import pytest
 
@@ -471,3 +472,71 @@ def test_intrinsics_from_video_srt_focal_len_preferred_over_db(synthetic_video_p
     assert provenance == "srt_focal_len"
     expected_fx = 10.0 / 17.3 * _VIDEO_WIDTH
     assert intrinsics.fx == pytest.approx(expected_fx)
+
+
+def test_per_frame_video_clock_csv_parses_and_is_measured_sync(tmp_path: Path) -> None:
+    """DJI_1001.csv-style export: drone_* columns, empty ``timestamp``, populated ``video_time_s``."""
+    path = tmp_path / "per_frame.csv"
+    path.write_text(
+        "frame_index,video_time_s,timestamp,drone_lat,drone_lon,drone_altitude_m,vehicle_lat\n"
+        "0,0.000000,,30.276501,-97.764242,445.9,\n"
+        "1,0.016685,,30.276502,-97.764243,446.0,\n"
+        "2,0.033368,,30.276503,-97.764244,446.1,\n"
+    )
+
+    samples, stats = load_telemetry(path, video_duration_s=0.0334)
+
+    assert stats["records_parsed"] == 3
+    assert stats["offset_source"] == "video_clock"
+    assert stats["time_offset_s"] == 0.0
+    assert samples[1].timestamp == pytest.approx(0.016685)
+    assert samples[2].geo.lat == pytest.approx(30.276503)
+    assert samples[2].geo.alt_msl == pytest.approx(446.1)
+
+
+def test_blank_priority_column_falls_back_per_row(tmp_path: Path) -> None:
+    """A blank higher-priority cell must fall through to the next candidate, not drop the row."""
+    path = tmp_path / "mixed.csv"
+    path.write_text("time,elapsed_time,latitude,longitude\n,1.5,10.0,20.0\n2.0,,10.1,20.1\n")
+
+    samples, stats = load_telemetry(path)
+
+    assert stats["records_parsed"] == 2
+    assert [s.timestamp for s in samples] == pytest.approx([1.5, 2.0])
+
+
+def test_video_source_undistortion_matches_opencv_and_can_be_switched_off(synthetic_video_path: Path) -> None:
+    """Once a lens is solved, every decoded frame is the pinhole image with the same K."""
+    K = np.array([[80.0, 0, _VIDEO_WIDTH / 2], [0, 80.0, _VIDEO_HEIGHT / 2], [0, 0, 1]])
+    dist = np.array([-0.2, 0.03, 0, 0, 0])
+    with VideoSource(synthetic_video_path) as video:
+        raw = video.read_frames([7])[0].image
+        video.set_undistortion(K, dist)
+        assert video.undistorting
+        undistorted = video.read_frames([7])[0].image
+        streamed = next(f.image for f in video.iter_frames() if f.index == 7)
+        video.set_undistortion(None, None)
+        again = video.read_frames([7])[0].image
+    expected = cv2.undistort(raw, K, dist, None, K)
+    assert np.abs(undistorted.astype(int) - expected.astype(int)).mean() < 2.0
+    np.testing.assert_array_equal(undistorted, streamed)
+    np.testing.assert_array_equal(again, raw)
+    assert np.abs(undistorted.astype(int) - raw.astype(int)).mean() > 5.0
+
+
+def test_keyframe_cache_undistorts_each_image_at_its_own_scale() -> None:
+    from drishti3d.pipeline.framecache import KeyframeImageCache
+
+    K = np.array([[800.0, 0, 640], [0, 800.0, 360], [0, 0, 1]])
+    dist = np.array([-0.2, 0.03, 0, 0, 0])
+    full = _synthetic_video_frame(3, 1280, 720)
+    half = cv2.resize(full, (640, 360), interpolation=cv2.INTER_AREA)
+    cache = KeyframeImageCache({0: full.copy(), 1: half.copy()}, 1920, {0: 1.0, 1: 0.5})
+    cache.undistort(K, dist)
+    cache.undistort(K, dist)  # idempotent
+    np.testing.assert_array_equal(cache.get(0), cv2.remap(
+        full, *cv2.initUndistortRectifyMap(K, dist, None, K, (1280, 720), cv2.CV_16SC2), cv2.INTER_LINEAR))
+    K_half = K.copy()
+    K_half[:2] *= 0.5
+    np.testing.assert_array_equal(cache.get(1), cv2.remap(
+        half, *cv2.initUndistortRectifyMap(K_half, dist, None, K_half, (640, 360), cv2.CV_16SC2), cv2.INTER_LINEAR))

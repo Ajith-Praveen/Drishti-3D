@@ -119,6 +119,7 @@ def select_pairs(
     strategy: str = "sequential+loop",
     window: int = 3,
     gps_radius_m: float | None = None,
+    max_loop_pairs_per_frame: int | None = None,
 ) -> list[tuple[int, int]]:
     """Choose which keyframe pairs to attempt matching on.
 
@@ -143,6 +144,11 @@ def select_pairs(
     search (they can still participate in sequential pairs); if fewer than
     two keyframes have a fix, the loop-closure pass is skipped entirely
     since there is nothing to radius-query.
+
+    ``max_loop_pairs_per_frame`` keeps only each keyframe's nearest loop
+    partners (by GPS distance): with a radius wide enough to reach the
+    neighbouring strip of a mapping grid, a few ties per frame are what
+    hold the strips together; every pair costs a match and a verification.
     """
     if strategy not in ("sequential", "sequential+loop"):
         raise ValueError(f"unknown pair-selection strategy {strategy!r}; expected 'sequential' or 'sequential+loop'")
@@ -162,11 +168,21 @@ def select_pairs(
             enu, _origin = telemetry_to_enu([samples[i] for i in geo_idx])
             tree = cKDTree(enu)
             close_pairs = tree.query_pairs(r=gps_radius_m)
+            loops: list[tuple[float, int, int]] = []
             for a, b in close_pairs:
                 gi, gj = geo_idx[a], geo_idx[b]
                 lo, hi = (gi, gj) if gi < gj else (gj, gi)
                 if hi - lo > window:  # already covered by the sequential pass otherwise
-                    pairs.add((lo, hi))
+                    loops.append((float(np.linalg.norm(enu[a] - enu[b])), lo, hi))
+            taken: dict[int, int] = {}
+            for _dist, lo, hi in sorted(loops):
+                if max_loop_pairs_per_frame is not None and (
+                    taken.get(lo, 0) >= max_loop_pairs_per_frame or taken.get(hi, 0) >= max_loop_pairs_per_frame
+                ):
+                    continue
+                pairs.add((lo, hi))
+                taken[lo] = taken.get(lo, 0) + 1
+                taken[hi] = taken.get(hi, 0) + 1
 
     return sorted(pairs)
 

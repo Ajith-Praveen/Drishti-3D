@@ -77,7 +77,7 @@ _HEADLINE: tuple[tuple[str, str, str, str, str], ...] = (
         "Sub-pixel means the poses and the features agree.",
     ),
     (
-        "Coverage", "coverage_pct", "%", "{:.1f}",
+        "Timeline coverage", "coverage_pct", "%", "{:.1f}",
         "Fraction of the flight timeline represented by a selected keyframe.",
     ),
     (
@@ -95,6 +95,7 @@ _CONFIDENCE_ROWS: tuple[tuple[str, str, str], ...] = (
 
 #: Flat provenance/diagnostic rows shown under the headline tiles.
 _DETAIL_ROWS: tuple[tuple[str, str], ...] = (
+    ("Representation", "reconstruction_representation"),
     ("Confidence source", "confidence_source"),
     ("Merge strategy", "merge_strategy"),
     ("Merge reason", "merge_strategy_reason"),
@@ -404,6 +405,15 @@ class ReportPanel(QWidget):
         fmt = self._report.get("telemetry_format")
         cancelled = self._report.get("cancelled")
 
+        outcome = self._report.get("outcome")
+        if outcome in {"failed", "unverified", "cancelled"}:
+            self._show_banner(
+                f"{outcome.upper()} — DIAGNOSTIC OUTPUT. "
+                + " ".join(self._report.get("quality_reasons") or []),
+                theme.WARN, theme.WARN_DIM,
+            )
+            return
+
         if cancelled:
             self._show_banner(
                 "This run was cancelled. Every figure below describes the partial "
@@ -438,7 +448,7 @@ class ReportPanel(QWidget):
         lines: list[str] = []
         if _is_computed(notes):
             lines.extend(notes if isinstance(notes, list) else [str(notes)])
-        if isinstance(placement, dict) and placement.get("passed") is False:
+        if isinstance(placement, dict) and placement.get("verdict", "FAIL" if placement.get("passed") is False else "PASS") == "FAIL":
             reason = placement.get("reason") or "windows disagree on where the ground is"
             lines.append(f"Placement check FAILED: {reason}")
 

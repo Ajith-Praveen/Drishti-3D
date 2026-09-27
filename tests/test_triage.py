@@ -708,3 +708,21 @@ def test_select_keyframes_never_returns_duplicate_frame_indices_vision_mode(para
     indices = [kf.frame_index for kf in keyframes]
     assert len(indices) > 1
     assert len(set(indices)) == len(indices), f"duplicate frame_index values in vision-only mode: {indices}"
+
+
+def test_turn_rate_measures_course_change() -> None:
+    import numpy as np
+
+    from drishti3d.triage.selector import _turn_rate_deg_s
+
+    t = np.arange(0.0, 10.0, 0.2)
+    # Straight east at 10 m/s for 5 s, then a 90 deg left turn over 2 s, then north.
+    heading = np.where(t < 5, 0.0, np.where(t < 7, (t - 5) * 45.0, 90.0))
+    step = 10.0 * 0.2
+    e = np.concatenate([[0.0], np.cumsum(step * np.cos(np.radians(heading[:-1])))])
+    n = np.concatenate([[0.0], np.cumsum(step * np.sin(np.radians(heading[:-1])))])
+    lookup = (t, np.c_[e, n, np.zeros_like(t)], None)
+
+    assert _turn_rate_deg_s(lookup, 2.5) < 1.0
+    assert 30.0 < _turn_rate_deg_s(lookup, 6.0) < 60.0
+    assert _turn_rate_deg_s(lookup, 0.2) is None  # no history yet

@@ -1157,6 +1157,7 @@ def _derive_voxel_size(
     gsd_multiplier: float,
     voxel_count_budget: int,
     stats: dict,
+    dense_grid_budget: int | None = None,
 ) -> float:
     """Pick the TSDF voxel size: GSD-derived, clamped against a voxel-count budget.
 
@@ -1267,6 +1268,21 @@ def _derive_voxel_size(
     ideal_count = _voxel_count(ideal)
     if ideal_count <= voxel_count_budget:
         stats["voxel_size_budget_exceeded"] = False
+        # The untiled TSDF allocates its whole bounding box densely. A close,
+        # forward camera gives millimetre GSD over a 40 m scene: 63 M voxels
+        # and 496 s for a 36 s clip (Front_View_Light). Keep that grid within
+        # the caller's dense budget; tiled fusion (budget exceeded) is separate.
+        # Only forward/oblique footage passes one: a nadir survey's GSD is the
+        # right voxel regardless of its extent.
+        if not dense_grid_budget:
+            return ideal
+        lo, hi = np.percentile(xyz, 1, axis=0), np.percentile(xyz, 99, axis=0)
+        volume = float(np.prod(np.maximum(hi - lo, ideal)))
+        dense_min = (volume / float(dense_grid_budget)) ** (1.0 / 3.0)
+        if dense_min > ideal:
+            coarse = float(np.clip(dense_min, _AUTO_VOXEL_MIN_M, _AUTO_VOXEL_MAX_M))
+            stats["voxel_size_dense_grid_clamp_m"] = round(coarse, 4)
+            return coarse
         return ideal
 
     # Coarsen just enough to fit. The occupied set is a surface, so its
@@ -1783,6 +1799,8 @@ def fuse_submaps(
     keyframe_intrinsics: dict[int, CameraIntrinsics] | None = None,
     point_filter: Callable[[PointCloud], np.ndarray] | None = None,
     keyframe_altitude_m: dict[int, float] | None = None,
+    anchored: bool = False,
+    dense_grid_budget: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, PointCloud]:
     """Fuse a sequence of globally-aligned submaps into one confidence-aware mesh.
 
@@ -1979,7 +1997,39 @@ def fuse_submaps(
     else:
         tier = _quantize_confidence_to_tier(merged.confidence, raw_confidence_measured_min, raw_confidence_low_min)
         stats["confidence_source"] = "backbone_confidence_and_view_count"
+        raw = None if merged.confidence is None else np.asarray(merged.confidence, dtype=np.float64)
+        if (
+            anchored
+            and tier is not None
+            and raw is not None
+            and raw.size
+            and float(np.mean(tier >= int(min_confidence or 0))) < 0.05
+            and float(np.nanpercentile(raw, 99)) < raw_confidence_low_min
+        ):
+            # The backbone's confidence is uncalibrated for this footage
+            # (Front_View_Light: 99th percentile 0.29 against a 0.3 LOW
+            # threshold), so every point would be dropped. The depth was fitted
+            # to the solved 3D points, so it is anchored, not guessed: keep it
+            # at LOW, never MEASURED, and let volumetric fusion's multi-view
+            # weighting decide the surface.
+            tier = np.full(tier.shape, int(Confidence.LOW_CONFIDENCE), dtype=np.uint8)
+            stats["confidence_source"] = "ba_anchored_depth_uncalibrated_backbone_confidence"
     merged = PointCloud(xyz=merged.xyz, rgb=merged.rgb, covariance=merged.covariance, confidence=tier)
+    # A backbone depth map can carry NaN/inf where it predicted nothing
+    # (sky, a forward camera's horizon); one such point made the k-d tree
+    # below raise and took the whole fusion stage down (Front_View_Light).
+    finite = np.isfinite(np.asarray(merged.xyz)).all(axis=1)
+    if not finite.all():
+        stats["non_finite_points_dropped"] = int((~finite).sum())
+        merged = PointCloud(
+            xyz=merged.xyz[finite],
+            rgb=None if merged.rgb is None else merged.rgb[finite],
+            covariance=None if merged.covariance is None else merged.covariance[finite],
+            confidence=None if merged.confidence is None else merged.confidence[finite],
+        )
+        if merged.xyz.shape[0] == 0:
+            stats["empty_at_step"] = "all merged points were non-finite"
+            return (*_empty_mesh(), _empty_point_cloud())
 
     cleaned = statistical_outlier_removal(merged, k=outlier_k, std_ratio=outlier_std_ratio)
     stats["after_outlier_removal"] = int(cleaned.xyz.shape[0])
@@ -2035,7 +2085,10 @@ def fuse_submaps(
     voxel_size = (
         float(configured_voxel_size)
         if configured_voxel_size
-        else _derive_voxel_size(cleaned.xyz, poses, keyframe_intrinsics, voxel_size_gsd_multiplier, voxel_count_budget, stats)
+        else _derive_voxel_size(
+            cleaned.xyz, poses, keyframe_intrinsics, voxel_size_gsd_multiplier, voxel_count_budget, stats,
+            dense_grid_budget=dense_grid_budget,
+        )
     )
     if configured_voxel_size:
         stats["voxel_size_source"] = "config_override"

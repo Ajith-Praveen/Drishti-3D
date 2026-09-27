@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 __all__ = ["GEOMETRY_CACHE_FILE", "cache_key", "load_geometry_cache", "save_geometry_cache"]
 
 GEOMETRY_CACHE_FILE = "geometry_cache.pkl"
-_VERSION = 2  # 2: Submap.view_index added; older caches lack it
+_VERSION = 5  # Auto now reconstructs volumetrically; preserve finished surfaces through fusion.
 
 #: State attributes GeometryStage owns. Declared fields and the ad-hoc
 #: diagnostics attributes downstream stages and the report card read.
@@ -59,6 +59,12 @@ _STATE_ATTRS = (
     "depth_anchor_diags",
     "depth_anchor_summary",
     "yaw_refinement",
+    "placement_report",
+    "geometry_heightmap",
+    "geometry_premeshed",
+    "incremental_fusion",
+    "mvs3d_diagnostics",
+    "heightfield_diagnostics",
 )
 
 
@@ -82,6 +88,22 @@ def cache_key(state) -> dict:
         # The pose prior (matching + BA before geometry) changes the poses
         # everything in geometry is conditioned on.
         "matching": asdict(state.config.matching),
+        "telemetry_clock": getattr(state, "telemetry_stats", None),
+        # Frames are undistorted once a lens is solved or supplied; geometry
+        # computed on the raw frames is not reusable after that.
+        "lens": getattr(state, "lens_distortion", None),
+        "conditioning": [
+            {
+                "pose": {"R": kf.pose.R.tolist(), "t": kf.pose.t.tolist()} if kf.pose is not None else None,
+                "intrinsics": (
+                    [kf.intrinsics.fx, kf.intrinsics.fy, kf.intrinsics.cx, kf.intrinsics.cy,
+                     kf.intrinsics.width, kf.intrinsics.height,
+                     None if kf.intrinsics.dist_coeffs is None else kf.intrinsics.dist_coeffs.tolist()]
+                    if getattr(kf, "intrinsics", None) is not None else None
+                ),
+            }
+            for kf in state.keyframes
+        ],
     }
 
 

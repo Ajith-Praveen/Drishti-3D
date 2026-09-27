@@ -183,7 +183,9 @@ class PipelineWorker(QObject):
                 self.previewUpdate.emit,
             )
         except PipelineCancelled:
-            self.failed.emit("Pipeline cancelled by user.")
+            from drishti3d.pipeline.result import PipelineResult
+
+            self.finished.emit(PipelineResult(report={"cancelled": True}))
             return
         except Exception:  # noqa: BLE001 - by design: never let the worker thread crash the app
             self.failed.emit(traceback.format_exc())
@@ -428,11 +430,15 @@ class RealPipeline:
         telemetry_path: str | None = None,
         config: Config | None = None,
         backbone: str | None = None,
+        telemetry_offset_s: float | None = None,
     ) -> None:
         self.video_path = video_path
         self.telemetry_path = telemetry_path or None
         self.config = config
         self.backbone = backbone
+        # None = let ingest detect it (isVideo / video clock); a number is
+        # an explicit, measured offset and is reported as such.
+        self.telemetry_offset_s = telemetry_offset_s
 
     def __call__(
         self,
@@ -468,6 +474,7 @@ class RealPipeline:
             progress_cb=_progress_cb,
             cancel_token=cancel_token,
             backbone=self.backbone,
+            telemetry_offset_s=self.telemetry_offset_s,
             partial_cb=report_partial,
             preview_cb=report_preview,
         )

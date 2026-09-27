@@ -20,6 +20,7 @@ as "not computed" in the card.
 
 from __future__ import annotations
 
+from html import escape
 from typing import Any
 
 import numpy as np
@@ -51,6 +52,9 @@ _ANCHOR_SPREAD_WARN = 1.5
 # (rather than repeating the same four lines five times) so adding a new
 # passthrough metric is a one-line change.
 _SCALAR_METRICS: tuple[tuple[str, str], ...] = (
+    ("outcome", "outcome"),
+    ("diagnostic_output", "diagnostic_output"),
+    ("quality_reasons", "quality_reasons"),
     ("relative_rmse_m", "relative_rmse_m"),
     ("absolute_rmse_m", "absolute_rmse_m"),
     ("scale_error_pct", "scale_error_pct"),
@@ -75,6 +79,12 @@ _SCALAR_METRICS: tuple[tuple[str, str], ...] = (
     ("telemetry_offset_source", "telemetry_offset_source"),
     ("telemetry_video_coverage_fraction", "telemetry_video_coverage_fraction"),
     ("telemetry_format", "telemetry_format"),
+    # TimeSyncStage's image-motion clock measurement (ingest.timesync).
+    ("time_sync", "time_sync"),
+    # Height-field multi-view stereo diagnostics (geometry.heightfield), when
+    # the dense surface was measured that way rather than by the backbone.
+    ("dense_surface", "dense_surface"),
+    ("reconstruction_representation", "reconstruction_representation"),
     # Which submap-merge strategy GeometryStage actually used (see
     # geometry.flight_profile/geometry.submap) and why -- a reader
     # comparing junction_residuals across runs needs to know this, since
@@ -134,6 +144,14 @@ def build_report(pipeline_artifacts: dict[str, Any]) -> dict[str, Any]:
         value = pipeline_artifacts.get(in_key)
         report[out_key] = value if value is not None else NOT_COMPUTED
 
+    from drishti3d.pipeline.quality import OUTCOMES
+
+    if report["outcome"] not in OUTCOMES:
+        report["outcome"] = "unverified"
+    report["diagnostic_output"] = report["outcome"] != "valid"
+    if not isinstance(report["quality_reasons"], list):
+        report["quality_reasons"] = []
+
     confidence_breakdown: dict[str, float] | str | None = None
     if pipeline_artifacts.get("confidence_breakdown_pct") is not None:
         confidence_breakdown = pipeline_artifacts["confidence_breakdown_pct"]
@@ -161,6 +179,11 @@ def build_report(pipeline_artifacts: dict[str, Any]) -> dict[str, Any]:
 
     pose_prior = pipeline_artifacts.get("pose_prior")
     report["pose_prior"] = pose_prior if pose_prior else NOT_COMPUTED
+
+    # Carried as None (not NOT_COMPUTED) when absent: the renderer treats a
+    # falsy value as "no reference configured". Without this line the card
+    # said so even after an alignment had been applied to the model.
+    report["reference_alignment"] = pipeline_artifacts.get("reference_alignment") or None
 
     merge_strategy_warnings = pipeline_artifacts.get("merge_strategy_warnings")
     report["merge_strategy_warnings"] = merge_strategy_warnings if merge_strategy_warnings else NOT_COMPUTED
@@ -270,6 +293,22 @@ def check_point_residuals(
     }
 
 
+def _time_sync_line(sync: dict) -> str:
+    """One report-card line for TimeSyncStage's measurement."""
+    lag = sync.get("lag_s")
+    measured = sync.get("offset_measured_s")
+    if not sync.get("confident"):
+        return f"inconclusive ({sync.get('reason', 'no reason recorded')})"
+    if sync.get("applied"):
+        return f"applied {lag:+.2f} s -> offset {measured:.2f} s ({sync.get('turning_pairs')} turning keyframe pairs)"
+    if sync.get("disagrees"):
+        return (
+            f"WARNING: images put the telemetry {lag:+.2f} s off (measured offset {measured:.2f} s); "
+            "the given offset was kept"
+        )
+    return f"agrees to {lag:+.2f} s"
+
+
 def _fmt(value: Any, suffix: str = "") -> str:
     if value == NOT_COMPUTED or value is None:
         return NOT_COMPUTED
@@ -281,6 +320,14 @@ def _fmt(value: Any, suffix: str = "") -> str:
 def render_report_text(report: dict[str, Any]) -> str:
     """Render the report card as plain text (console/log-friendly)."""
     lines = ["DRISHTI-3D Accuracy Report Card", "=" * 32, ""]
+    lines.append(f"Reconstruction outcome: {report.get('outcome', 'unverified')}")
+    lines.append(f"Representation: {report.get('reconstruction_representation') or 'not recorded'}")
+    if report.get("outcome") != "valid":
+        lines.append("DIAGNOSTIC OUTPUT — not a validated reconstruction")
+    reasons = report.get("quality_reasons")
+    if isinstance(reasons, list):
+        lines.extend(f"  {reason}" for reason in reasons)
+    lines.append("")
 
     lines.append(f"Relative RMSE:            {_fmt(report.get('relative_rmse_m'), ' m')}")
     lines.append(f"Absolute RMSE:            {_fmt(report.get('absolute_rmse_m'), ' m')}")
@@ -305,6 +352,9 @@ def render_report_text(report: dict[str, Any]) -> str:
     lines.append(f"  Offset source:   {_fmt(offset_source)}")
     if offset_source == "assumed_zero" and report.get("telemetry_format") in _OFFSET_GUESS_RISK_FORMATS:
         lines.append("  WARNING: this offset was not measured -- it is an unverified assumption.")
+    sync = report.get("time_sync")
+    if isinstance(sync, dict):
+        lines.append(f"  Image-motion check: {_time_sync_line(sync)}")
     coverage = report.get("telemetry_video_coverage_fraction")
     if coverage != NOT_COMPUTED and coverage is not None:
         lines.append(f"  Video coverage:  {coverage * 100.0:.1f} %")
@@ -378,6 +428,64 @@ def render_report_text(report: dict[str, Any]) -> str:
         for warning in warnings:
             lines.append(f"  WARNING: {warning}")
     lines.append("")
+
+    dense = report.get("dense_surface")
+    if isinstance(dense, dict):
+        secs = dense.get("seconds") or {}
+
+        def _pct(key):
+            return _fmt(round(100.0 * dense[key], 1) if dense.get(key) is not None else None)
+
+        lines.append("Dense surface:")
+        if dense.get("method") == "mvs3d":
+            sgm = " + semi-global matching" if dense.get("sgm_paths") else ""
+            refs = dense.get("references")
+            refs_txt = f", depth maps from {refs}" if refs is not None and refs != dense.get("views") else ""
+            lines.append(
+                f"  method:            measured 3D -- plane-sweep stereo per camera{sgm} + TSDF "
+                f"({_fmt(dense.get('views'))} views{refs_txt}, {_fmt(dense.get('voxel_m'))} m voxels)"
+            )
+            lines.append(
+                f"  mesh:              {_fmt(dense.get('vertices'))} vertices / {_fmt(dense.get('faces'))} faces, "
+                f"{_pct('measured_vertex_fraction')} % MEASURED; {_pct('consistent_fraction')} % of depth samples "
+                "agreed across views"
+            )
+            if dense.get("depth_px_masked"):
+                lines.append(
+                    f"  masked:            {_fmt(dense.get('depth_px_masked'))} depth samples on vehicles, people or "
+                    "sky (semantics stage) were not measured"
+                )
+            if dense.get("holes_filled_faces"):
+                lines.append(
+                    f"  gaps closed:       {_fmt(dense.get('holes_filled_faces'))} faces "
+                    f"({int(round(float(dense.get('holes_filled_m2') or 0.0))):,} m^2) triangulated across enclosed holes a downward "
+                    "camera cannot see (under canopy rims, beside walls) -- INFERRED surface, no new vertices"
+                )
+        else:
+            lines.append(
+                f"  method:            height-field multi-view stereo ({_fmt(dense.get('views'))} views, "
+                f"{_fmt(dense.get('cell_m'))} m cells, prior: {_fmt(dense.get('prior'))})"
+            )
+            lines.append(
+                f"  reconstructed:     {_fmt(dense.get('cells_reconstructed'))} cells ({_pct('cells_fraction')} % of the grid), "
+                f"median NCC {_fmt(dense.get('score_median'))}, {_fmt(dense.get('spikes_removed'))} spikes removed"
+            )
+            if dense.get("visible_cells"):
+                vm, vi = dense.get("visible_measured_fraction") or 0.0, dense.get("visible_inferred_fraction") or 0.0
+                lines.append(
+                    f"  visible scene:     {_fmt(dense.get('visible_cells'))} cells seen by the cameras; "
+                    f"{100.0 * vm:.1f} % measured by stereo, {100.0 * vi:.1f} % filled from the surroundings "
+                    f"(INFERRED, no measured uncertainty), {max(0.0, 100.0 * (1.0 - vm - vi)):.1f} % empty"
+                )
+            sigma = dense.get("height_uncertainty_m")
+            if isinstance(sigma, dict):
+                lines.append(
+                    f"  height uncertainty: median {_fmt(sigma.get('median'))} m, p90 {_fmt(sigma.get('p90'))} m; "
+                    f"{_fmt(round(100.0 * sigma['within_1m'], 1) if sigma.get('within_1m') is not None else None)} % of "
+                    "measured cells within 1 m (per point in model.las: height_uncertainty_m)"
+                )
+        lines.append(f"  time:              {_fmt(round(sum(secs.values()), 1) if secs else None)} s on {_fmt(dense.get('device'))}")
+        lines.append("")
 
     prior = report.get("pose_prior", NOT_COMPUTED)
     lines.append("Telemetry alignment (pose prior, before dense geometry):")
@@ -488,7 +596,7 @@ def render_report_text(report: dict[str, Any]) -> str:
     if placement == NOT_COMPUTED or not placement:
         lines.append(f"  {NOT_COMPUTED}")
     else:
-        verdict = "PASS" if placement.get("passed") else "FAIL"
+        verdict = placement.get("verdict") or ("PASS" if placement.get("passed") else "FAIL")
         lines.append(f"  verdict:                     {verdict}")
         lines.append(
             f"  ground spread across windows: {_fmt(placement.get('ground_spread_m'))} m "
@@ -496,10 +604,19 @@ def render_report_text(report: dict[str, Any]) -> str:
         )
         lines.append(f"  flat-ground thickness:        {_fmt(placement.get('flat_thickness_median_m'))} m")
         lines.append(f"  all-cell thickness:           {_fmt(placement.get('all_thickness_median_m'))} m")
+        if placement.get("reference_ground_error_median_m") is not None:
+            lines.append(
+                f"  vs {placement.get('reference_ground_source', 'reference')} ground:  "
+                f"median {_fmt(placement.get('reference_ground_error_median_m'))} m, "
+                f"worst {_fmt(placement.get('reference_ground_error_max_abs_m'))} m "
+                f"({_fmt(placement.get('reference_ground_cells'))} cells; decides the verdict)"
+            )
         if placement.get("gps_ground_z_m") is not None:
             lines.append(
                 f"  vs GPS ground height:         median {_fmt(placement.get('gps_ground_error_median_m'))} m, "
                 f"worst {_fmt(placement.get('gps_ground_error_max_abs_m'))} m"
+                + (" (takeoff height: wrong wherever terrain is not level with the launch point)"
+                   if placement.get("reference_ground_error_median_m") is not None else "")
             )
         by_submap = placement.get("gps_ground_error_by_submap") or placement.get("ground_z_by_submap") or {}
         if by_submap:
@@ -523,7 +640,7 @@ def render_report_text(report: dict[str, Any]) -> str:
                     f"  merge rescaled submaps over a {placement['merge_scale_spread']}x range -- it "
                     "takes scale from camera baselines, the anchor takes it from ground depth"
                 )
-        if not placement.get("passed"):
+        if verdict == "FAIL":
             lines.append(
                 "  -- fusion cannot fix this. Windows placed metres apart mesh into several copies"
             )
@@ -539,7 +656,7 @@ def render_report_text(report: dict[str, Any]) -> str:
     else:
         for j in junctions:
             flag = " [DEGENERATE]" if j.get("degenerate") else ""
-            lines.append(f"  junction {j.get('junction')}: rmse={j.get('rmse_m'):.4g} m{flag}")
+            lines.append(f"  junction {j.get('junction')}: rmse={_fmt(j.get('rmse_m'), ' m')}{flag}")
     lines.append("")
 
     check = report.get("check_point_residuals", NOT_COMPUTED)
@@ -559,6 +676,26 @@ def render_report_text(report: dict[str, Any]) -> str:
     else:
         for stage, seconds in timings.items():
             lines.append(f"  {stage}: {seconds:.2f} s")
+    ref = report.get("reference_alignment")
+    lines.append("")
+    lines.append("Reference alignment (orthophoto + elevation model):")
+    if not ref:
+        lines.append(f"  {NOT_COMPUTED} -- no reference configured; absolute accuracy is GPS-bounded")
+    elif not ref.get("applied"):
+        lines.append(f"  REFUSED: {ref.get('failure')}")
+    else:
+        h = ref.get("horizontal", {})
+        lines.append(
+            f"  shift applied: E {ref['shift_east_m']:+.2f} m, N {ref['shift_north_m']:+.2f} m, "
+            f"U {ref['shift_up_m']:+.2f} m, rotation {ref['rotation_deg']:+.3f} deg"
+        )
+        lines.append(
+            f"  match: {h.get('method')}, {h.get('inliers', 'n/a')} inliers, residual {h.get('residual_rms_m', 'n/a')} m"
+        )
+        lines.append(f"  reference: {ref.get('ortho')}")
+    first_patch = report.get("first_fused_patch_s")
+    if first_patch is not None:
+        lines.append(f"  first fused patch visible at: {first_patch:.1f} s after start")
 
     return "\n".join(lines) + "\n"
 
@@ -571,6 +708,9 @@ def render_report_html(report: dict[str, Any]) -> str:
 
     scalar_rows = "".join(
         [
+            row("Reconstruction outcome", str(report.get("outcome", "unverified"))),
+            row("Representation", str(report.get("reconstruction_representation") or "not recorded")),
+            row("Output status", "Validated" if report.get("outcome") == "valid" else "DIAGNOSTIC OUTPUT"),
             row("Relative RMSE", _fmt(report.get("relative_rmse_m"), " m")),
             row("Absolute RMSE", _fmt(report.get("absolute_rmse_m"), " m")),
             row("Scale error", _fmt(report.get("scale_error_pct"), " %")),
@@ -616,9 +756,16 @@ def render_report_html(report: dict[str, Any]) -> str:
         if isinstance(_coverage, (int, float))
         else ""
     )
+    _sync = report.get("time_sync")
+    _sync_html = (
+        row("Image-motion check" + (" ⚠" if _sync.get("disagrees") else ""), escape(_time_sync_line(_sync)))
+        if isinstance(_sync, dict)
+        else ""
+    )
     sync_rows = (
         row("Telemetry offset applied", _fmt(report.get("telemetry_offset_s"), " s"))
         + row(_offset_label, _fmt(_offset_source))
+        + _sync_html
         + _coverage_html
     )
 
@@ -676,7 +823,7 @@ def render_report_html(report: dict[str, Any]) -> str:
         junction_rows = "".join(
             row(
                 f"Junction {j.get('junction')}" + (" (DEGENERATE)" if j.get("degenerate") else ""),
-                f"{j.get('rmse_m'):.4g} m",
+                _fmt(j.get('rmse_m'), " m"),
             )
             for j in junctions
         )

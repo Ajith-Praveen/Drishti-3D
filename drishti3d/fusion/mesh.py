@@ -151,7 +151,12 @@ def poisson_reconstruct(
         if pc.rgb is not None:
             pcd.colors = o3d.utility.Vector3dVector(pc.rgb.astype(np.float64) / 255.0)
 
-        o3d_mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=depth)
+        # n_threads=1: Open3D 0.19's multithreaded Poisson solver segfaults
+        # intermittently on macOS arm64 -- measured 4 of 6 processes
+        # crashing over 15 reconstructions each, against 0 of 6 single
+        # threaded. A native crash kills the whole app mid-run, so this
+        # trades speed for a mesher that finishes.
+        o3d_mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=depth, n_threads=1)
         vertices = np.asarray(o3d_mesh.vertices)
         faces = np.asarray(o3d_mesh.triangles)
         densities = np.asarray(densities)

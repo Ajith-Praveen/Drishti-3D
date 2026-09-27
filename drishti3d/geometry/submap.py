@@ -135,7 +135,7 @@ _DEGENERATE_CONDITION_NUMBER = 1e4
 # The three merge strategies ``merge_submaps``/``alignment_residuals``
 # understand -- see the module docstring for what each does and when
 # ``geometry.flight_profile.analyze_flight_profile`` recommends it.
-_VALID_STRATEGIES = frozenset({"chained_sim3", "telemetry_rotation", "gps_anchored"})
+_VALID_STRATEGIES = frozenset({"chained_sim3", "telemetry_rotation", "gps_anchored", "world_frame"})
 
 
 @dataclass
@@ -789,6 +789,15 @@ def _chain_align(
 
     if not submaps:
         return [], [], [], []
+
+    if strategy == "world_frame":
+        # Submaps were rebuilt in the world frame from bundle-adjusted
+        # poses and BA-fitted depth (pipeline.stages._fit_window_to_ba), so
+        # there is nothing to fit: every transform is the identity and no
+        # window boundary can inject a Sim(3) error.
+        identity = [Sim3(scale=1.0, R=np.eye(3), t=np.zeros(3)) for _ in submaps]
+        diags = [{"method": "world_frame", "junction": i} for i in range(len(submaps))]
+        return identity, diags, [None] * len(submaps), [True] * len(submaps)
 
     n = len(submaps)
     transforms: list[Sim3 | None] = [None] * n

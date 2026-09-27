@@ -216,6 +216,33 @@ def test_select_pairs_gps_loop_closure_adds_pairs_beyond_window():
     assert (0, 19) in pairs_loop  # frame 0 and frame 19 sit at the same GPS position
 
 
+def test_select_pairs_ties_neighbouring_strips_with_a_capped_loop_radius():
+    """A mapping grid: two strips 25 m apart, flown in opposite directions (the flight01 layout)."""
+    per_strip, spacing, gap = 12, 25.0, 25.0
+    m_per_deg = 111_320.0
+    keyframes = []
+    for i in range(2 * per_strip):
+        strip, k = divmod(i, per_strip)
+        along = (k if strip == 0 else per_strip - 1 - k) * spacing
+        geo = GeoPoint(lat=10.0 + along / m_per_deg, lon=20.0 + strip * gap / (m_per_deg * np.cos(np.radians(10.0))),
+                       alt_msl=100.0)
+        keyframes.append(_kf(i, geo=geo))
+
+    def cross(pairs):
+        return [(i, j) for i, j in pairs if (i < per_strip) != (j < per_strip) and j - i > 3]  # not the turn
+
+    # The old fixed 15 m radius never reaches the other strip.
+    assert not cross(select_pairs(keyframes, window=3, gps_radius_m=15.0))
+    capped = select_pairs(keyframes, window=3, gps_radius_m=37.0, max_loop_pairs_per_frame=3)
+    ties = cross(capped)
+    assert len(ties) >= per_strip  # every frame of a strip is tied to the other one
+    loops = [(i, j) for i, j in capped if j - i > 3]
+    per_frame = np.bincount(np.array(loops).ravel(), minlength=len(keyframes))
+    assert per_frame.max() <= 3
+    # The cap keeps the nearest partner: the frame straight across the gap.
+    assert (0, 2 * per_strip - 1) in capped
+
+
 def test_select_pairs_rejects_bad_strategy():
     with pytest.raises(ValueError):
         select_pairs([_kf(0), _kf(1)], strategy="all_pairs")
@@ -519,3 +546,88 @@ def test_end_to_end_matching_triangulation_bundle_adjustment_chain():
     assert result.rmse_before_px > 5.0, "perturbation should have produced a clearly-broken initial guess"
     assert result.rmse_after_px < result.rmse_before_px * 0.25, "BA should substantially reduce reprojection RMSE"
     assert result.rmse_after_px < 5.0
+
+
+def test_matching_stage_falls_back_to_sift_when_kornia_is_missing(monkeypatch, caplog, tmp_path):
+    """The default method="disk" must run SIFT without kornia, not crash pose_prior.
+
+    learned_matching imports kornia only inside _disk()/_lightglue(), so an
+    ImportError guard around importing the module never fired: every
+    real-footage run died later, in detect_disk, with
+    ``ModuleNotFoundError: No module named 'kornia'``.
+    """
+    import logging
+    import sys
+
+    from drishti3d.config import Config
+    from drishti3d.geometry import features as features_mod
+    from drishti3d.geometry import learned_matching
+    from drishti3d.pipeline.stages import MatchingStage, PipelineState
+    from drishti3d.types import Frame
+
+    # Absent even where the `matching` extra is installed.
+    monkeypatch.setitem(sys.modules, "kornia", None)
+    monkeypatch.setitem(sys.modules, "kornia.feature", None)
+    # _disk() is lru_cached: a model loaded by an earlier test would never
+    # re-import kornia, so trip on the DISK path itself.
+    monkeypatch.setattr(learned_matching, "detect_disk", lambda *a, **k: pytest.fail("DISK path taken without kornia"))
+
+    methods = []
+    real_detect = features_mod.detect_and_describe
+
+    def spy_detect(gray, method="sift", **kwargs):
+        methods.append(method)
+        return real_detect(gray, method=method, **kwargs)
+
+    monkeypatch.setattr(features_mod, "detect_and_describe", spy_detect)
+
+    n_cams = 6
+    poses, intrinsics, images = _synthetic_flight(n_cams)
+    color = [cv2.cvtColor(img, cv2.COLOR_GRAY2BGR) for img in images]
+
+    class _Video:
+        def read_frames(self, indices):
+            return [Frame(index=i, timestamp=float(i), image=color[i]) for i in indices]
+
+    cfg = Config()
+    assert cfg.matching.method == "disk"  # the shipped default is the one that crashed
+    state = PipelineState(video_path=tmp_path / "x.mp4", telemetry_path=None, config=cfg, backbone_name="null")
+    state.keyframes = [_kf(i) for i in range(n_cams)]
+    state.poses = poses
+    state.intrinsics = intrinsics
+    state.video = _Video()
+
+    with caplog.at_level(logging.WARNING, logger="drishti3d.pipeline.stages"):
+        artifacts, _message = MatchingStage().run(state, cancel_token=None, progress_cb=None)
+
+    assert methods and set(methods) == {"sift"}
+    assert artifacts["tracks_triangulated"] >= 20
+    assert "falling back from DISK+LightGlue to SIFT" in caplog.text
+
+
+def test_point_cap_keeps_every_camera_observed() -> None:
+    import numpy as np
+
+    from drishti3d.geometry import triangulate as T
+    from drishti3d.geometry.tracks import Track, TrackSet
+    from drishti3d.types import CameraIntrinsics, Pose
+
+    K = CameraIntrinsics(fx=500, fy=500, cx=320, cy=240, width=640, height=480)
+    poses = [Pose(R=np.diag([1.0, -1.0, -1.0]), t=np.array([10.0 * c, 0.0, 50.0])) for c in range(6)]
+    tracks, points = [], []
+    # 50 long tracks all on cameras 0-2, and short ones on cameras 3-5.
+    for k in range(60):
+        cams = [0, 1, 2] if k < 50 else [3 + (k % 3), 3 + ((k + 1) % 3)]
+        X = np.array([10.0 * cams[0] + (k % 7) - 3, (k % 5) - 2.0, 0.0])
+        obs = []
+        for c in cams:
+            xc = poses[c].R.T @ (X - poses[c].t)
+            obs.append((c, k, np.array([K.fx * xc[0] / xc[2] + K.cx, K.fy * xc[1] / xc[2] + K.cy])))
+        tracks.append(Track(observations=obs))
+        points.append(X)
+
+    _pts, kept = T.filter_by_reprojection(np.array(points), TrackSet(tracks=tracks), poses, [K] * 6, max_px=5.0, max_points=20)
+
+    seen = {obs[0] for t in kept.tracks for obs in t.observations}
+    assert len(kept.tracks) == 20
+    assert seen == set(range(6))

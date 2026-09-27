@@ -1,0 +1,7 @@
+<!-- DRISHTI-3D placeholder mark · 64x64 grid. Replace with the final logo; keep the viewBox square. -->
+<svg id="drishti-mark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" aria-label="DRISHTI-3D">
+  <polygon points="32.00,5.00 55.38,18.50 55.38,45.50 32.00,59.00 8.62,45.50 8.62,18.50" stroke="#E3ECEE" stroke-width="3.2" stroke-linejoin="round"/>
+  <path d="M32.00 5.00L42.76 29.71M55.38 18.50L39.36 40.17M55.38 45.50L28.60 42.46M32.00 59.00L21.24 34.29M8.62 45.50L24.64 23.83M8.62 18.50L35.40 21.54" stroke="#E3ECEE" stroke-width="2.2" stroke-linecap="round" opacity=".55"/>
+  <circle cx="32" cy="32" r="11" stroke="#E3ECEE" stroke-width="2.2"/>
+  <circle cx="32" cy="32" r="5.2" fill="#36C2D4"/>
+</svg>

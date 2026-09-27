@@ -1,19 +1,22 @@
-"""Camera intrinsics priors for the ingest stage.
+"""Camera intrinsics for the ingest stage.
 
-Everything returned here is a *prior*, not a calibration. We never have a
-checkerboard for these clips, so fx/fy/cx/cy are always a best-effort guess
-from whatever is cheaply available (embedded metadata, a small built-in
-camera database, or a generic drone HFOV) -- good enough to seed
-structure-from-motion, which is expected to *refine* these values (and
-possibly recover distortion) via self-calibration once enough keyframes
-have been reconstructed. Do not treat the values returned here as ground
-truth.
+``intrinsics_from_config`` returns an operator-supplied calibration (the
+problem statement's optional camera-intrinsics input) with provenance
+``"user"``. Without one, everything returned here is a *prior*, not a
+calibration: fx/fy/cx/cy are a best-effort guess from whatever is cheaply
+available (embedded metadata, a small built-in camera database, or a
+generic drone HFOV) -- good enough to seed structure-from-motion, which is
+expected to *refine* these values (and possibly recover distortion) via
+self-calibration once enough keyframes have been reconstructed. Do not
+treat those guesses as ground truth.
 """
 
 from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING, Any
+
+import numpy as np
 
 from drishti3d.types import CameraIntrinsics
 
@@ -137,3 +140,70 @@ def intrinsics_from_video(
         )
 
     return CameraIntrinsics.from_hfov(_DEFAULT_HFOV_DEG, width, height), "default_guess"
+
+
+_ACCEPTED_DIST_LENGTHS = (4, 5, 8, 12, 14)  # the coefficient counts OpenCV's distortion models accept
+
+
+def intrinsics_from_config(ingest_cfg: Any, width: int, height: int) -> tuple[CameraIntrinsics, str] | None:
+    """Operator-supplied calibration from ``IngestConfig``, or ``None`` when none was given.
+
+    ``camera_fx`` wins over ``camera_hfov_deg``; with neither set this
+    returns ``None`` and the caller falls back to ``intrinsics_from_video``.
+    Provenance is always ``"user"``: a calibration the operator vouches for,
+    which focal-from-flow and bundle-adjustment focal refinement leave alone
+    (they only replace ``"default_guess"``).
+
+    Raises ``ValueError`` for values no real camera can have, so a typo
+    fails at ingest instead of surfacing later as a warped model.
+    """
+    fx = getattr(ingest_cfg, "camera_fx", None)
+    hfov = getattr(ingest_cfg, "camera_hfov_deg", None)
+    if fx is None and hfov is None:
+        if getattr(ingest_cfg, "camera_dist_coeffs", None) is not None:
+            raise ValueError(
+                "camera_dist_coeffs needs camera_fx or camera_hfov_deg: distortion coefficients are "
+                "defined relative to a focal length, so they cannot be paired with a guessed one"
+            )
+        return None
+
+    if fx is not None:
+        fx = float(fx)
+        fy = float(getattr(ingest_cfg, "camera_fy", None) or fx)
+        cx = getattr(ingest_cfg, "camera_cx", None)
+        cy = getattr(ingest_cfg, "camera_cy", None)
+        calib_width = getattr(ingest_cfg, "camera_calibration_width", None)
+        if calib_width is not None and calib_width <= 0:
+            raise ValueError(f"camera_calibration_width must be positive, got {calib_width}")
+        factor = width / float(calib_width) if calib_width else 1.0
+        fx, fy = fx * factor, fy * factor
+        cx = width / 2.0 if cx is None else float(cx) * factor
+        cy = height / 2.0 if cy is None else float(cy) * factor
+    else:
+        hfov = float(hfov)
+        if not 1.0 < hfov < 179.0:
+            raise ValueError(f"camera_hfov_deg must be between 1 and 179 degrees, got {hfov}")
+        base = CameraIntrinsics.from_hfov(hfov, width, height)
+        fx, fy, cx, cy = base.fx, base.fy, base.cx, base.cy
+
+    if fx <= 0 or fy <= 0:
+        raise ValueError(f"camera focal lengths must be positive, got fx={fx}, fy={fy}")
+    if not (0.0 <= cx <= width and 0.0 <= cy <= height):
+        raise ValueError(f"principal point ({cx}, {cy}) lies outside the {width}x{height} image")
+
+    dist = getattr(ingest_cfg, "camera_dist_coeffs", None)
+    dist_coeffs = None
+    if dist is not None:
+        dist_coeffs = np.asarray(dist, dtype=np.float64).reshape(-1)
+        if dist_coeffs.size not in _ACCEPTED_DIST_LENGTHS:
+            raise ValueError(
+                f"camera_dist_coeffs needs {', '.join(map(str, _ACCEPTED_DIST_LENGTHS))} values "
+                f"(OpenCV order k1, k2, p1, p2[, k3...]), got {dist_coeffs.size}"
+            )
+        if not np.all(np.isfinite(dist_coeffs)):
+            raise ValueError("camera_dist_coeffs must all be finite")
+
+    intrinsics = CameraIntrinsics(
+        fx=fx, fy=fy, cx=cx, cy=cy, width=width, height=height, dist_coeffs=dist_coeffs
+    )
+    return intrinsics, "user"

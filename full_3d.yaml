@@ -1,0 +1,22 @@
+# Full 3D: preserve visible vertical and stacked surfaces; never height-map fusion.
+# Geometry is constrained by the captured views. No sub-metre guarantee.
+quality_profile: fast
+geometry:
+  backbone: mapanything
+  dense_method: full3d
+  single_inference: false
+  window_size: 8
+  max_image_size: 518
+  plane_sweep: true
+  dense_target_views: 0
+  max_devices: 1
+fusion:
+  heightmap_for_nadir: false
+  voxel_count_budget: 16000000
+  max_mesh_faces: 8000000
+texture:
+  enabled: true
+  texture_size: 2048
+  max_views: 30
+semantics:
+  enabled: false

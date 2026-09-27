@@ -55,7 +55,11 @@ import cv2
 import numpy as np
 
 from drishti3d.geometry.bundle import gimbal_to_R
-from drishti3d.geometry.features import detect_and_describe, geometric_verify, match_features
+from drishti3d.geometry.features import (
+    detect_and_describe,
+    geometric_verify,
+    match_features,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +124,26 @@ def yaw_for_pair(
     coherence = float(np.linalg.norm(mean_vec))
     phi_measured = float(np.degrees(np.arctan2(mean_vec[1], mean_vec[0])))
 
+    # Separate image rotation from translation before deriving a heading.
+    # Raw feature flow includes camera yaw, especially around flight turns.
+    # For nadir imagery a similarity maps reference pixels into source
+    # pixels; its centre displacement, rotated back, is translation in A.
+    affine, affine_inliers = cv2.estimateAffinePartial2D(
+        fa.keypoints[q, :2], fb.keypoints[t, :2], method=cv2.RANSAC,
+        ransacReprojThreshold=3.0, maxIters=2000, confidence=0.99,
+    )
+    if affine is None or affine_inliers is None or int(affine_inliers.sum()) < _MIN_INLIERS:
+        return None, {"failure": "cannot separate image rotation from translation"}
+    A = affine[:, :2]
+    if abs(np.linalg.det(A)) < 1e-8:
+        return None, {"failure": "degenerate image motion"}
+    centre = np.array([img_a.shape[1] / 2, img_a.shape[0] / 2])
+    translation = np.linalg.solve(A, A @ centre + affine[:, 2] - centre)
+    if np.linalg.norm(translation) < 1:
+        return None, {"failure": "insufficient translation after compensating rotation"}
+    phi_measured = float(np.degrees(np.arctan2(translation[1], translation[0])))
+    yaw_change = float(np.degrees(np.arctan2(A[1, 0], A[0, 0])))
+
     # Coarse-to-fine 1-D search. The residual is periodic with a single
     # minimum for a nadir camera, so this is exact to the fine step.
     coarse = np.arange(0.0, 360.0, 1.0)
@@ -130,6 +154,8 @@ def yaw_for_pair(
     yaw = float(fine[int(np.argmin(res_f))] % 360.0)
 
     return yaw, {
+        "yaw_b_deg": (yaw + yaw_change) % 360.0,
+        "image_rotation_deg": round(yaw_change, 3),
         "inliers": int(keep.sum()),
         "flow_coherence": round(coherence, 3),
         "residual_deg": round(float(res_f.min()), 2),
@@ -178,7 +204,8 @@ def estimate_yaw_from_flow(
     n_flow = 0
     deltas: list[float] = []
     for i in range(n):
-        candidates = [y for y in (pair_yaw[i - 1] if i > 0 else None, pair_yaw[i] if i < n - 1 else None) if y is not None]
+        previous_yaw = pair_diag[i - 1].get("yaw_b_deg", pair_yaw[i - 1]) if i > 0 else None
+        candidates = [y for y in (previous_yaw, pair_yaw[i] if i < n - 1 else None) if y is not None]
         prior = prior_yaw_deg[i]
         if candidates:
             yaw = _circular_mean_deg(candidates)

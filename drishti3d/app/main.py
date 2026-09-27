@@ -32,6 +32,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--telemetry", type=str, default=None, help="Path to a flight telemetry file to preload."
     )
     parser.add_argument("--config", type=str, default=None, help="Path to a pipeline config YAML.")
+    parser.add_argument("--output", type=str, default=None, help="Output directory for the run.")
+    parser.add_argument(
+        "--telemetry-offset", type=float, default=None, help="Flight-log seconds at video frame 0 (default: auto)."
+    )
+    parser.add_argument("--reference-ortho", type=str, default=None, help="Reference orthophoto GeoTIFF.")
+    parser.add_argument("--reference-dem", type=str, default=None, help="Reference elevation-model GeoTIFF.")
+    parser.add_argument(
+        "--open-run", type=str, default=None,
+        help="A saved run directory (meta.json + arrays.npz) to open, as File > Open Run does.",
+    )
+    parser.add_argument(
+        "--autorun",
+        action="store_true",
+        help="Press Run as soon as the window is up (the GUI run, started without a click).",
+    )
     parser.add_argument(
         "--log-level", type=str, default="INFO", help="Logging level (DEBUG, INFO, WARNING, ...)."
     )
@@ -82,6 +97,22 @@ def main(argv: list[str] | None = None) -> int:
     window.viewport.start()
     window.raise_()
     window.activateWindow()
+    if args.output:
+        window.settings_panel.output_edit.setText(args.output)
+    if args.telemetry_offset is not None:
+        window.settings_panel.set_telemetry_offset(args.telemetry_offset)
+    if args.reference_ortho:
+        window.settings_panel.ref_ortho_edit.setText(args.reference_ortho)
+    if args.reference_dem:
+        window.settings_panel.ref_dem_edit.setText(args.reference_dem)
+    if args.open_run:
+        from PySide6.QtCore import QTimer
+
+        QTimer.singleShot(800, lambda: window._load_result(args.open_run))
+    if args.autorun:
+        from PySide6.QtCore import QTimer
+
+        QTimer.singleShot(1500, window.topbar.run_button.click)
     return app.exec()
 
 

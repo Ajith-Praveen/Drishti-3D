@@ -602,3 +602,35 @@ def test_labels_are_upsampled_nearest_not_bilinear() -> None:
     assert 'native_small[None, None].float(), size=(h, w), mode="nearest"' in src
     # The confidence upsample may be bilinear.
     assert 'conf_small[None, None], size=(h, w), mode="bilinear"' in src
+
+
+@pytest.mark.parametrize("pitch_down,checkpoint,skipped", [
+    (True, "nvidia/segformer-b4-finetuned-ade-512-512", True),     # nadir + ground-level model: pointless
+    (False, "nvidia/segformer-b4-finetuned-ade-512-512", False),   # forward footage: in domain
+    (True, "chribark/segformer-b3-finetuned-UAVid", False),        # an aerial checkpoint runs on nadir
+])
+def test_ground_level_segmenter_is_skipped_on_downward_flights(tmp_path, monkeypatch, pitch_down, checkpoint, skipped):
+    from drishti3d.config import Config
+    from drishti3d.pipeline import stages
+    from drishti3d.pipeline.stages import PipelineState, SemanticsStage, StageUnavailable
+    from drishti3d.types import FrameMetrics, Keyframe, Pose
+
+    cfg = Config()
+    cfg.semantics.checkpoint = checkpoint
+    state = PipelineState(tmp_path / "v.mp4", None, cfg, "null")
+    R = np.diag([1.0, -1.0, -1.0]) if pitch_down else np.array([[0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]])
+    state.keyframes = [Keyframe(i, float(i), FrameMetrics(i, float(i), 100.0, 1.0, 120.0, 0.0),
+                                pose=Pose(R=R, t=np.array([float(i), 0.0, 50.0]))) for i in range(4)]
+    state.video = object()
+
+    class Reached(Exception):
+        pass
+
+    def fake_create(*a, **kw):
+        raise Reached
+
+    monkeypatch.setattr("drishti3d.semantics.segmenter.create_segmenter", fake_create)
+    expected = StageUnavailable if skipped else Reached
+    with pytest.raises(expected):
+        SemanticsStage().run(state, None, None)
+    assert stages._ground_level_checkpoint(checkpoint) == ("ade" in checkpoint)

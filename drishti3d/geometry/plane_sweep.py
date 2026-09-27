@@ -137,7 +137,7 @@ def _sweep_one_view(
     import torch
     import torch.nn.functional as F
 
-    n_views, _, height, width = images_t.shape
+    _n_views, _, height, width = images_t.shape
     ref_intr = intrinsics[ref_idx]
     ref_pose = poses[ref_idx]
 
@@ -195,6 +195,7 @@ def _sweep_one_view(
 
     best_ncc = torch.full((height, width), -1.0, device=device)
     best_scale = torch.ones((height, width), device=device)
+    best_index = torch.full((height, width), -1, device=device, dtype=torch.int64)
     # Cost curve statistics, for the flat-curve (textureless) rejection.
     ncc_sum = torch.zeros((height, width), device=device)
     ncc_count = torch.zeros((height, width), device=device)
@@ -230,12 +231,23 @@ def _sweep_one_view(
                 continue
 
             src_gray = images_t[src_idx].mean(dim=0, keepdim=True)[None]
-            # (H, W, k*k) source coordinates: projected patch centre plus
-            # the patch's own pixel offsets.
-            pu = u[..., None] + off_x
-            pv = v[..., None] + off_y
+            # Warp each patch on its reference fronto-parallel depth plane.
+            # Copying image offsets into the source is only valid for equal
+            # intrinsics and parallel cameras; yaw/tilt otherwise breaks NCC.
+            relative_R = r_ref.T @ r_src
+            offsets = torch.stack(
+                [off_x / ref_intr.fx, off_y / ref_intr.fy, torch.zeros_like(off_x)], dim=-1
+            ) @ relative_R
+            qx = q[..., 0, None] + depth_h[..., None] * offsets[:, 0]
+            qy = q[..., 1, None] + depth_h[..., None] * offsets[:, 1]
+            qz = q[..., 2, None] + depth_h[..., None] * offsets[:, 2]
+            pu = src_intr.fx * qx / qz.clamp_min(1e-6) + src_intr.cx
+            pv = src_intr.fy * qy / qz.clamp_min(1e-6) + src_intr.cy
+            inside &= ((qz > 1e-6) & (pu >= 0.5) & (pu <= width - 0.5)
+                       & (pv >= 0.5) & (pv <= height - 0.5)).all(dim=-1)
+            inside &= (xs >= patch_radius) & (xs < width - patch_radius) & (ys >= patch_radius) & (ys < height - patch_radius)
             grid = torch.stack(
-                [2.0 * pu / max(width - 1, 1) - 1.0, 2.0 * pv / max(height - 1, 1) - 1.0], dim=-1
+                [2.0 * pu / width - 1.0, 2.0 * pv / height - 1.0], dim=-1
             ).reshape(1, height, width * k * k, 2)
             sampled = F.grid_sample(src_gray, grid, align_corners=False, padding_mode="zeros")
             # -> (1, k*k, H*W), matching unfold's layout for the reference.
@@ -253,18 +265,20 @@ def _sweep_one_view(
 
         mean_ncc = ncc_accum / seen.clamp_min(1.0)
         mean_ncc = torch.where(seen > 0, mean_ncc, torch.full_like(mean_ncc, -1.0))
-        view_count = torch.maximum(view_count, seen)
         ncc_sum += torch.where(seen > 0, mean_ncc, torch.zeros_like(mean_ncc))
         ncc_count += (seen > 0).float()
 
         improved = mean_ncc > best_ncc
+        # Support must belong to the selected depth, not some other hypothesis.
+        view_count = torch.where(improved, seen, view_count)
         best_prev = torch.where(improved, prev_ncc, best_prev)
         best_next = torch.where(improved, torch.full_like(best_next, -1.0), best_next)
         # The sample right after the current best completes its triple.
-        just_after = (best_ncc == prev_ncc) & (best_next < -0.5) & (h_i > 0)
+        just_after = (best_index == h_i - 1) & (~improved) & (h_i > 0)
         best_next = torch.where(just_after, mean_ncc, best_next)
         best_scale = torch.where(improved, torch.full_like(best_scale, float(scale)), best_scale)
         best_ncc = torch.where(improved, mean_ncc, best_ncc)
+        best_index = torch.where(improved, torch.full_like(best_index, h_i), best_index)
         prev_ncc = mean_ncc
 
     # Sub-pixel: parabola through (prev, best, next) in hypothesis index.

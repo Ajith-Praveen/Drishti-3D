@@ -116,6 +116,50 @@ def _frame_gray(frame: Frame) -> np.ndarray:
     return cv2.cvtColor(frame.image, cv2.COLOR_BGR2GRAY)
 
 
+class _LazyEntry:
+    """A buffer entry that converts and blur-scores its frame only when read.
+
+    Behaves as the ``(index, timestamp, gray, blur)`` tuple every other
+    function here expects -- indexing and unpacking both work -- so the
+    window search and blur floor are unchanged. In GPS-baseline mode the
+    trigger needs only timestamps, so most frames are never converted.
+    """
+
+    __slots__ = ("_lazy", "_gray", "_blur")
+
+    def __init__(self, lazy) -> None:
+        self._lazy = lazy
+        self._gray: np.ndarray | None = None
+        self._blur: float | None = None
+
+    def _ensure(self) -> None:
+        if self._gray is None:
+            self._gray = _frame_gray(self._lazy.small(_SCAN_DOWNSCALE_PX))
+            self._blur = blur_score(self._gray)
+
+    def __getitem__(self, i: int):
+        if i == 0:
+            return self._lazy.index
+        if i == 1:
+            return self._lazy.timestamp
+        self._ensure()
+        return self._gray if i == 2 else self._blur
+
+    def __iter__(self):
+        return iter((self[0], self[1], self[2], self[3]))
+
+    def __len__(self) -> int:
+        return 4
+
+    def bgr24(self) -> np.ndarray:
+        return self._lazy.bgr24()
+
+
+def _eager_entry(frame: Frame) -> _BufferEntry:
+    gray = _frame_gray(frame)
+    return (frame.index, frame.timestamp, gray, blur_score(gray))
+
+
 def _coerce_samples(
     telemetry: list[TelemetrySample] | tuple[list[TelemetrySample], dict] | None,
 ) -> list[TelemetrySample] | None:
@@ -179,6 +223,25 @@ def _interp_enu_position(
     return xyz, alt
 
 
+def _turn_rate_deg_s(lookup, timestamp: float, half_window_s: float = 1.0) -> float | None:
+    """GPS course change rate (deg/s) around ``timestamp``; ``None`` when not measurable.
+
+    Course from the track over ``[t - h, t]`` versus ``[t, t + h]``. Slow
+    or hovering stretches (under 2 m moved per half-window) have no
+    meaningful course and report ``None`` rather than noise.
+    """
+    a, _ = _interp_enu_position(lookup, timestamp - half_window_s)
+    b, _ = _interp_enu_position(lookup, timestamp)
+    c, _ = _interp_enu_position(lookup, timestamp + half_window_s)
+    if a is None or b is None or c is None:
+        return None
+    d1, d2 = (b - a)[:2], (c - b)[:2]
+    if np.linalg.norm(d1) < 2.0 or np.linalg.norm(d2) < 2.0:
+        return None
+    ang = np.degrees(np.arctan2(d1[0] * d2[1] - d1[1] * d2[0], float(d1 @ d2)))
+    return abs(float(ang)) / half_window_s
+
+
 # ---------------------------------------------------------------------------
 # Ring-buffered sharpest-frame window search (DEFECT 3)
 # ---------------------------------------------------------------------------
@@ -202,7 +265,9 @@ def _blur_floor(buffer: deque[_BufferEntry], absolute_min: float, relative_thres
     return max(absolute_min, relative_threshold * running_median)
 
 
-def _extend_buffer_to(frame_iter: Iterator[Frame], buffer: deque[_BufferEntry], target_index: int) -> None:
+def _extend_buffer_to(
+    frame_iter: Iterator[Frame], buffer: deque[_BufferEntry], target_index: int, make_entry=_eager_entry
+) -> None:
     """Pull more frames from the sequential decode iterator until the buffer reaches ``target_index``.
 
     The window search looks ahead of the trigger point
@@ -218,8 +283,7 @@ def _extend_buffer_to(frame_iter: Iterator[Frame], buffer: deque[_BufferEntry], 
         frame = next(frame_iter, None)
         if frame is None:
             return
-        gray = _frame_gray(frame)
-        buffer.append((frame.index, frame.timestamp, gray, blur_score(gray)))
+        buffer.append(make_entry(frame))
         last_index = frame.index
 
 
@@ -232,6 +296,7 @@ def _pick_sharpest_in_window(
     absolute_min_blur: float,
     relative_blur_threshold: float,
     min_index_exclusive: int = -1,
+    make_entry=_eager_entry,
 ) -> _BufferEntry | None:
     """Among frames near ``center_index``, return the sharpest one that clears the blur floor.
 
@@ -269,7 +334,7 @@ def _pick_sharpest_in_window(
     """
     lo = max(0, center_index - radius, min_index_exclusive + 1)
     hi = center_index + radius
-    _extend_buffer_to(frame_iter, buffer, hi)
+    _extend_buffer_to(frame_iter, buffer, hi, make_entry)
 
     floor = _blur_floor(buffer, absolute_min_blur, relative_blur_threshold)
 
@@ -364,6 +429,8 @@ def select_keyframes(
     telemetry: list[TelemetrySample] | tuple[list[TelemetrySample], dict] | None = None,
     progress_cb: ProgressCallback | None = None,
     intrinsics: CameraIntrinsics | None = None,
+    full_res_sink: dict[int, np.ndarray] | None = None,
+    diag_out: dict | None = None,
 ) -> tuple[list[Keyframe], list[FrameMetrics]]:
     """Select a baseline-driven subset of frames worth reconstructing from.
 
@@ -407,6 +474,56 @@ def select_keyframes(
         enu_lookup = _prepare_enu_lookup(samples)
         use_gps = enu_lookup is not None
 
+    # Overlap-driven spacing (triage.footprint): measure how much ground one
+    # image covers along the track and space keyframes for
+    # `forward_overlap` of it. Falls back to the altitude rule below when
+    # the footprint cannot be measured.
+    footprint = None
+    overlap = float(getattr(config, "forward_overlap", 0.0) or 0.0)
+    if use_gps and enu_lookup is not None and 0.0 < overlap < 1.0 and hasattr(video, "read_frames"):
+        from drishti3d.triage.footprint import measure_footprint
+
+        try:
+            footprint = measure_footprint(video, enu_lookup)
+        except Exception:
+            logger.warning("triage: footprint measurement failed; using the altitude rule", exc_info=True)
+            footprint = None
+    if diag_out is not None and footprint is not None:
+        diag_out["footprint"] = footprint.summary()
+        diag_out["forward_overlap"] = overlap
+        diag_out["spacing_m_median"] = round((1.0 - overlap) * footprint.median_along_m, 2)
+
+    def _spacing_at(t: float) -> float | None:
+        return None if footprint is None else (1.0 - overlap) * footprint.at(t)
+
+    if use_gps and enu_lookup is not None:
+        # The keyframe cap must never truncate the flight: covering the whole
+        # track needs about length / spacing keyframes. DJI_1001 (4.1 km)
+        # once stopped at 150 after 3.4 km, leaving the last 150 s of video
+        # unreconstructed.
+        t_arr, enu_xyz, _alt = enu_lookup
+        # Only the stretch the video covers: a flight log usually runs well
+        # past both ends of the clip (flight01's log is 15.4 km, a 6-minute
+        # clip of it ~6 km).
+        fps = float(getattr(video, "fps", 0.0) or 0.0)
+        frames = int(getattr(video, "frame_count", 0) or 0)
+        if fps > 0 and frames > 0:
+            in_video = (t_arr >= 0.0) & (t_arr <= frames / fps)
+            enu_xyz = enu_xyz[in_video]
+        track_m = float(np.linalg.norm(np.diff(enu_xyz[:, :2], axis=0), axis=1).sum()) if len(enu_xyz) > 1 else 0.0
+        spacing = (1.0 - overlap) * footprint.median_along_m if footprint is not None else config.max_baseline_m
+        needed = int(math.ceil(track_m / max(spacing, 1e-6) * 1.15)) + 10
+        if needed > config.target_keyframes:
+            logger.info(
+                "triage: raising keyframe target %d -> %d to cover the %.0f m GPS track at ~%.0f m spacing",
+                config.target_keyframes,
+                needed,
+                track_m,
+                spacing,
+            )
+            import dataclasses
+
+            config = dataclasses.replace(config, target_keyframes=needed)
     total_frames = video.frame_count or 0
     scan_step = 1
     if total_frames > 0 and config.max_frames_scanned > 0:
@@ -433,12 +550,23 @@ def select_keyframes(
     # keyframes until the cursor finally advances past it.
     last_keyframe_index = -1
 
-    frame_iter = video.iter_frames(step=1, downscale=_SCAN_DOWNSCALE_PX)
+    # GPS mode never needs pixels to decide WHEN to take a keyframe, so
+    # frames are decoded but only converted and blur-scored when a window
+    # search reads them (see _LazyEntry). Vision mode needs every
+    # checkpoint's pixels for parallax, so it stays eager.
+    lazy = use_gps and getattr(config, "lazy_decode", True) and hasattr(video, "iter_frames_lazy")
+    if lazy:
+        frame_iter = video.iter_frames_lazy()
+        make_entry = _LazyEntry
+    else:
+        frame_iter = video.iter_frames(step=1, downscale=_SCAN_DOWNSCALE_PX)
+        make_entry = _eager_entry
+    last_checkpoint_entry = None
+    turn_deferrals = 0
 
     for frame in frame_iter:
-        gray = _frame_gray(frame)
-        blur = blur_score(gray)
-        buffer.append((frame.index, frame.timestamp, gray, blur))
+        entry = make_entry(frame)
+        buffer.append(entry)
 
         if frame.index % scan_step != 0:
             # Decoded (and buffered) for the ring buffer's sake, but not a
@@ -446,6 +574,15 @@ def select_keyframes(
             continue
 
         checkpoint_count += 1
+        if lazy:
+            # A lazy checkpoint's pixel metrics are measured only if a
+            # window search reads it; the first and last are always
+            # recorded so the report's scanned timeline spans the video.
+            last_checkpoint_entry = entry
+            gray = entry[2] if checkpoint_count == 1 else None
+            blur = entry[3] if checkpoint_count == 1 else None
+        else:
+            gray, blur = entry[2], entry[3]
         stale = frame.index <= last_keyframe_index
 
         step_signal = 0.0
@@ -460,9 +597,24 @@ def select_keyframes(
                         accumulated_baseline_m += step_signal
                     prev_pos = pos
                 target_baseline_m = effective_min_baseline_m
-                if alt is not None:
+                measured = _spacing_at(frame.timestamp)
+                if measured is not None:
+                    # Overlap-driven: (1 - forward_overlap) x measured footprint.
+                    target_baseline_m = max(effective_min_baseline_m, measured)
+                elif alt is not None:
                     target_baseline_m = max(effective_min_baseline_m, config.baseline_to_altitude_ratio * alt)
                 triggered = accumulated_baseline_m >= target_baseline_m
+                # Hold the keyframe through a hard turn: the aircraft banks,
+                # the image blurs, and on flight01 (17.6 m/s lawnmower) the
+                # windows spanning turns landed tens of metres off. Baseline
+                # keeps accumulating, so the first steady frame after the
+                # turn is taken instead.
+                max_turn = getattr(config, "max_turn_rate_deg_s", None)
+                if triggered and max_turn:
+                    rate = _turn_rate_deg_s(enu_lookup, frame.timestamp)
+                    if rate is not None and rate > max_turn:
+                        triggered = False
+                        turn_deferrals += 1
             else:
                 if prev_gray is not None:
                     step_signal = estimate_parallax_detailed(prev_gray, gray, intrinsics=intrinsics).useful_baseline_px
@@ -470,16 +622,17 @@ def select_keyframes(
                 prev_gray = gray
                 triggered = accumulated_vision_px >= effective_min_parallax
 
-        all_metrics.append(
-            FrameMetrics(
-                index=frame.index,
-                timestamp=frame.timestamp,
-                blur_score=blur,
-                exposure_score=exposure_score(gray),
-                mean_luma=mean_luma(gray),
-                estimated_parallax=step_signal,
+        if gray is not None:
+            all_metrics.append(
+                FrameMetrics(
+                    index=frame.index,
+                    timestamp=frame.timestamp,
+                    blur_score=blur,
+                    exposure_score=exposure_score(gray),
+                    mean_luma=mean_luma(gray),
+                    estimated_parallax=step_signal,
+                )
             )
-        )
 
         if progress_cb is not None:
             progress_cb(
@@ -496,6 +649,7 @@ def select_keyframes(
                 config.min_blur_score,
                 config.relative_blur_threshold,
                 min_index_exclusive=last_keyframe_index,
+                make_entry=make_entry,
             )
             if chosen is None:
                 logger.debug("triage: deferred keyframe near frame %d (no sharp candidate in window)", frame.index)
@@ -506,6 +660,10 @@ def select_keyframes(
                 continue
 
             chosen_index, chosen_timestamp, chosen_gray, chosen_blur = chosen
+            if full_res_sink is not None and isinstance(chosen, _LazyEntry):
+                # Decoded right now: keep its full-resolution pixels so the
+                # keyframe cache needs no second pass over the video.
+                full_res_sink[chosen_index] = chosen.bgr24()
             chosen_metrics = FrameMetrics(
                 index=chosen_index,
                 timestamp=chosen_timestamp,
@@ -542,6 +700,18 @@ def select_keyframes(
                 effective_min_baseline_m = _maybe_adapt_threshold(
                     effective_min_baseline_m, config, len(keyframes), total_frames, frame.index, progress_cb
                 )
+                # Never past MapAnything's usable footprint: beyond it consecutive
+                # keyframes stop overlapping (see TriageConfig.max_baseline_m).
+                if footprint is None:
+                    effective_min_baseline_m = min(
+                        effective_min_baseline_m, max(config.max_baseline_m, config.min_baseline_m)
+                    )
+                else:
+                    # Never let the count-driven adaptation push spacing past
+                    # the overlap target: overlap, not count, sets spacing.
+                    effective_min_baseline_m = min(
+                        effective_min_baseline_m, max(config.min_baseline_m, (1.0 - overlap) * footprint.median_along_m)
+                    )
             else:
                 effective_min_parallax = _maybe_adapt_threshold(
                     effective_min_parallax, config, len(keyframes), total_frames, frame.index, progress_cb
@@ -550,6 +720,19 @@ def select_keyframes(
         if checkpoint_count >= config.max_frames_scanned:
             logger.info("triage: hit max_frames_scanned (%d) safety cap", config.max_frames_scanned)
             break
+
+    if lazy and last_checkpoint_entry is not None and (not all_metrics or all_metrics[-1].index != last_checkpoint_entry[0]):
+        gray = last_checkpoint_entry[2]
+        all_metrics.append(
+            FrameMetrics(
+                index=last_checkpoint_entry[0],
+                timestamp=last_checkpoint_entry[1],
+                blur_score=last_checkpoint_entry[3],
+                exposure_score=exposure_score(gray),
+                mean_luma=mean_luma(gray),
+                estimated_parallax=0.0,
+            )
+        )
 
     if samples:
         telemetry_results = resample_telemetry(samples, [kf.timestamp for kf in keyframes])
@@ -575,6 +758,8 @@ def select_keyframes(
         deduped_keyframes.append(kf)
     keyframes = deduped_keyframes
 
+    if turn_deferrals:
+        logger.info("triage: held %d keyframe trigger(s) through hard turns", turn_deferrals)
     return keyframes, all_metrics
 
 

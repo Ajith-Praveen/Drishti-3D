@@ -41,8 +41,8 @@ if ! command -v uv > /dev/null 2>&1; then
     exit 1
 fi
 
-echo "==> syncing dependencies (gui + ml extras)"
-uv sync --extra gui --extra ml
+echo "==> syncing dependencies (gui + ml + semantics + texture + reference extras)"
+uv sync --extra gui --extra ml --extra semantics --extra texture --extra reference
 
 VENV_PYTHON=".venv/bin/python"
 SITE_PACKAGES="$("$VENV_PYTHON" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"

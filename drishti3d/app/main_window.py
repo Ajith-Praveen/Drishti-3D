@@ -48,6 +48,7 @@ import numpy as np
 from PySide6.QtCore import Qt, QThread, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence
 from PySide6.QtWidgets import (
+    QApplication,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -64,6 +65,7 @@ from PySide6.QtWidgets import (
 from drishti3d.app import icons, theme
 from drishti3d.app.panels.diagnostics import DiagnosticsPanel
 from drishti3d.app.panels.layers_panel import LayersPanel
+from drishti3d.app.panels.preferences import PreferencesDialog
 from drishti3d.app.panels.report_panel import ReportPanel
 from drishti3d.app.panels.settings_panel import SettingsPanel
 from drishti3d.app.panels.stage_rail import STAGE_SPECS, StageRail
@@ -84,6 +86,7 @@ TELEMETRY_EXTENSIONS = (".csv", ".srt", ".json", ".gpx", ".txt")
 _STAGE_WEIGHTS: dict[str, float] = {
     "ingest": 0.5,
     "triage": 247.0,
+    "time_sync": 5.0,
     "drone_path": 0.1,
     "coverage": 0.1,
     "semantics": 1.0,
@@ -117,6 +120,8 @@ class MainWindow(QMainWindow):
         self._closing = False
         self._video_path = ""
         self._telemetry_path = ""
+        self._run_dir: Path | None = None
+        self._pending_appearance = False
 
         self._build_ui()
         self._build_menus()
@@ -280,9 +285,22 @@ class MainWindow(QMainWindow):
 
         # --- Tools --------------------------------------------------------------
         tools_menu = menu_bar.addMenu("&Tools")
+        self._add_action(tools_menu, "Measure &Point (coordinates)", lambda: self._start_measure("point"), "P")
         self._add_action(tools_menu, "Measure &Distance", self._measure_distance, "M")
         self._add_action(tools_menu, "Measure &Area", self._measure_area, "Shift+M")
+        self._add_action(tools_menu, "Measure &Volume (cut / fill)", lambda: self._start_measure("volume"), "V")
+        self._add_action(tools_menu, "Elevation Pro&file", lambda: self._start_measure("profile"), "L")
+        self._add_action(tools_menu, "&Export Measurements… (GeoJSON / KML)", self._export_measurements)
         self._add_action(tools_menu, "&Clear Measurements", self._clear_measurements)
+        tools_menu.addSeparator()
+        # NoRole keeps it under Tools: on macOS Qt otherwise moves any
+        # "Preferences…" item into the application menu by text heuristic.
+        prefs = QAction("&Preferences…", self)
+        prefs.setMenuRole(QAction.NoRole)
+        prefs.setShortcut(QKeySequence("Ctrl+,"))
+        prefs.triggered.connect(self._open_preferences)
+        tools_menu.addAction(prefs)
+        self.addAction(prefs)
 
         # --- Help ------------------------------------------------------------------
         help_menu = menu_bar.addMenu("&Help")
@@ -321,6 +339,7 @@ class MainWindow(QMainWindow):
         self.layers_panel.pointSizeChanged.connect(self.viewport.set_point_size)
 
         self.viewport.measurementMade.connect(self._on_measurement_made)
+        self.viewport.measurementCompleted.connect(self._on_measurement_completed)
         self.viewport.sceneChanged.connect(lambda: self.layers_panel.sync_from_viewport(self.viewport))
 
         self.settings_panel.settingsChanged.connect(self._on_settings_changed)
@@ -458,9 +477,19 @@ class MainWindow(QMainWindow):
         self.settings_panel.begin_run()
         config = self.settings_panel.build_config()
         run_dir = self._preview_run_dir(config)
+        try:
+            import tempfile
+
+            run_dir.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryFile(dir=run_dir):
+                pass
+        except OSError as exc:
+            QMessageBox.warning(self, "Output folder unavailable", f"Choose a writable output folder in Settings.\n\n{exc}")
+            return
         self._run_started = time.time()
 
         self._reset_for_run()
+        self._run_dir = run_dir
         self.diagnostics.set_run_dir(run_dir, epoch=self._run_started)
         self.diagnostics.append_log(f"run started — output: {Path(run_dir).resolve()}")
         if not self._telemetry_path:
@@ -469,7 +498,12 @@ class MainWindow(QMainWindow):
             )
 
         self._start_pipeline(
-            RealPipeline(self._video_path, telemetry_path=self._telemetry_path or None, config=config)
+            RealPipeline(
+                self._video_path,
+                telemetry_path=self._telemetry_path or None,
+                config=config,
+                telemetry_offset_s=self.settings_panel.telemetry_offset_s,
+            )
         )
 
     def _start_demo_pipeline(self) -> None:
@@ -570,6 +604,15 @@ class MainWindow(QMainWindow):
 
         if isinstance(result, PointCloud):
             self.viewport.set_point_cloud(result)
+            # A partial has no photo colour yet: show it as a heatmap of how
+            # well each spot is measured (metres when the stereo measured it)
+            # as it grows -- but only switch away from plain RGB, never
+            # override a mode the operator picked.
+            if result.rgb is None and self.viewport.color_mode() == "rgb":
+                if result.uncertainty_m is not None:
+                    self._set_color_mode("uncertainty")
+                elif result.confidence is not None:
+                    self._set_color_mode("confidence")
             self._update_counts()
 
     def _on_preview_update(self, stage: str, snapshot: object) -> None:
@@ -583,6 +626,10 @@ class MainWindow(QMainWindow):
         """
         if not isinstance(snapshot, dict):
             return
+
+        datum = snapshot.get("height_datum_m")
+        if datum is not None:
+            self.viewport.set_height_datum(datum, "Elevation (m)")
 
         poses = snapshot.get("poses")
         if poses:
@@ -601,7 +648,13 @@ class MainWindow(QMainWindow):
         if point_cloud is not None:
             self.viewport.set_point_cloud(point_cloud)
             if faces is not None and len(faces):
-                self.viewport.set_mesh(point_cloud.xyz, faces, point_cloud.rgb)
+                self.viewport.set_mesh(
+                    point_cloud.xyz,
+                    faces,
+                    point_cloud.rgb,
+                    confidence=point_cloud.confidence,
+                    uncertainty_m=point_cloud.uncertainty_m,
+                )
                 # The surface supersedes its own vertices; showing both
                 # just makes the mesh look noisy.
                 self.viewport.set_point_cloud_visible(False)
@@ -623,7 +676,7 @@ class MainWindow(QMainWindow):
         sample flight it FAILED by 18 m while the app said nothing.
         """
         placement = artifacts.get("placement")
-        if isinstance(placement, dict) and placement.get("passed") is False:
+        if isinstance(placement, dict) and placement.get("verdict", "FAIL" if placement.get("passed") is False else "PASS") == "FAIL":
             reason = placement.get("reason") or "windows disagree on the ground plane"
             self.diagnostics.append_log(f"GATE FAILED [{stage}]: {reason}")
             self.stage_rail.set_summary(f"Placement check failed: {reason}", "warn")
@@ -653,7 +706,7 @@ class MainWindow(QMainWindow):
                 self.report_panel.set_report(report)
 
         self.progress_line.set_fraction(1.0)
-        self._finish_ui("Finished")
+        self._finish_ui(result.outcome_label if isinstance(result, PipelineResult) else "Unverified — diagnostic output")
         self._update_counts()
         self.layers_panel.sync_from_viewport(self.viewport)
 
@@ -664,10 +717,15 @@ class MainWindow(QMainWindow):
                 stage_result.name, stage_result.status, stage_result.message, stage_result.elapsed_s
             )
             self.diagnostics.set_stage_artifacts(stage_result.name, stage_result.artifacts)
-            first_line = stage_result.message.splitlines()[0] if stage_result.message else ""
+            first_line = stage_result.message if stage_result.status == "failed" else (
+                stage_result.message.splitlines()[0] if stage_result.message else ""
+            )
             self.diagnostics.append_log(
                 f"[{stage_result.name}] {stage_result.status}" + (f": {first_line}" if first_line else "")
             )
+
+        datum = _result_height_datum(result)
+        self.viewport.set_height_datum(datum if datum is not None else 0.0, "Elevation (m)")
 
         if result.poses:
             centres = np.array([np.asarray(p.t, dtype=np.float64).reshape(3) for p in result.poses])
@@ -681,7 +739,10 @@ class MainWindow(QMainWindow):
             self.viewport.set_point_cloud(result.point_cloud, reset_camera=True)
             faces = getattr(result, "mesh_faces", None)
             if faces is not None and len(faces):
-                self.viewport.set_mesh(result.point_cloud.xyz, faces, result.point_cloud.rgb)
+                pc = result.point_cloud
+                self.viewport.set_mesh(
+                    pc.xyz, faces, pc.rgb, confidence=pc.confidence, uncertainty_m=pc.uncertainty_m
+                )
                 self.viewport.set_point_cloud_visible(False)
                 self.layers_panel._rows["points"].check.setChecked(False)
 
@@ -690,6 +751,8 @@ class MainWindow(QMainWindow):
         # saved before the card existed -- or one cancelled before
         # export -- still shows real figures rather than a blank table.
         self.report_panel.set_report(result.report_card())
+        self.stage_label.setText(result.outcome_label)
+        self.stage_rail.set_summary(result.outcome_label, "ok" if result.outcome == "valid" else "warn")
         if (result.report or {}).get("cancelled"):
             self.diagnostics.append_log("run cancelled by the operator; showing the partial result")
 
@@ -698,7 +761,9 @@ class MainWindow(QMainWindow):
         self.diagnostics.stop()
         self.stage_rail.fail(self._current_stage, message)
         self.diagnostics.append_log(f"ERROR: {message.splitlines()[-1] if message else 'failed'}")
-        self._finish_ui("Failed")
+        self.report_panel.set_report({"outcome": "failed", "diagnostic_output": True,
+                                      "quality_reasons": ["Reconstruction failed; retained geometry is diagnostic only."]})
+        self._finish_ui("Failed — diagnostic output")
         if not self._closing:
             QMessageBox.critical(
                 self,
@@ -710,8 +775,11 @@ class MainWindow(QMainWindow):
     def _finish_ui(self, status: str) -> None:
         elapsed = self._elapsed_text()
         self.stage_label.setText(status)
-        if status == "Finished":
-            self.stage_rail.finish(f"Finished in {elapsed}" if elapsed else "Finished")
+        if status == "Valid":
+            self.stage_rail.finish(f"Valid — completed in {elapsed}" if elapsed else "Valid")
+        else:
+            self.stage_rail.finish(status, successful=False)
+            self.stage_rail.set_summary(status, "error" if status.startswith("Failed") else "warn")
         self.topbar.set_running(False)
         self.run_action.setEnabled(bool(self._video_path))
         self.cancel_action.setEnabled(False)
@@ -724,6 +792,9 @@ class MainWindow(QMainWindow):
         self._worker = None
         if self._closing:
             self.close()
+            return
+        if self._pending_appearance:
+            QTimer.singleShot(0, self._rebuild_for_appearance)
 
     # ------------------------------------------------------------------
     # Status
@@ -770,11 +841,12 @@ class MainWindow(QMainWindow):
         self.diagnostics.append_log(f"run saved to {path}")
         self.statusBar().showMessage(f"Saved run to {path}", 5000)
 
-    def _load_result(self) -> None:
-        """Open a run previously written by Save Run — instant, no GPU."""
+    def _load_result(self, path: str | None = None) -> None:
+        """Open a run previously written by Save Run — instant, no GPU. ``path`` skips the folder dialog."""
         if self._busy():
             return
-        path = QFileDialog.getExistingDirectory(self, "Open Run Directory")
+        if not path:
+            path = QFileDialog.getExistingDirectory(self, "Open Run Directory")
         if not path:
             return
 
@@ -803,14 +875,15 @@ class MainWindow(QMainWindow):
         run_dir = self._preview_run_dir(result.config) if result.config else Path(path)
         if not (Path(run_dir) / "preview").exists():
             run_dir = Path(path)
+        self._run_dir = run_dir
         self.diagnostics.set_run_dir(run_dir, epoch=None)
 
         self._apply_result(result)
-        self._finish_ui("Loaded")
+        self._finish_ui(result.outcome_label)
         self.progress_line.set_fraction(1.0)
         self._update_counts()
         self.layers_panel.sync_from_viewport(self.viewport)
-        self.stage_rail.set_summary(f"Loaded run: {Path(path).name}", "ok")
+        self.stage_rail.set_summary(f"{result.outcome_label} — {Path(path).name}", "ok" if result.outcome == "valid" else "warn")
         self.diagnostics.append_log(f"opened saved run {path}")
 
     def _export_model(self) -> None:
@@ -824,23 +897,50 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Export Model",
-            "model.ply",
+            "model.ply" if self._last_result.outcome == "valid" else "model.diagnostic.ply",
             "PLY point cloud (*.ply);;LAS point cloud (*.las);;OBJ mesh (*.obj);;glTF binary (*.glb);;XYZ text (*.xyz)",
         )
         if not path:
             return
 
-        from drishti3d.export.formats import as_geometry, write_geometry
+        from drishti3d.export import formats
+
+        path = Path(path)
+        if self._last_result.outcome != "valid" and not path.stem.endswith(".diagnostic"):
+            path = path.with_name(f"{path.stem}.diagnostic{path.suffix}")
 
         point_cloud = self._last_result.point_cloud
         faces = getattr(self._last_result, "mesh_faces", None)
-        payload = (
-            (point_cloud.xyz, faces, point_cloud.rgb, point_cloud.confidence)
-            if faces is not None and len(faces)
-            else point_cloud
-        )
+        has_mesh = faces is not None and len(faces) > 0
+        payload = (point_cloud.xyz, faces, point_cloud.rgb, point_cloud.confidence) if has_mesh else point_cloud
+        ext = path.suffix.lower()
+        if ext == ".obj" and not has_mesh:
+            QMessageBox.information(
+                self, "Export Model", "OBJ is a mesh format and this run has no mesh -- choose PLY, LAS or XYZ."
+            )
+            return
         try:
-            write_geometry(as_geometry(payload), path)
+            # Each writer has its own signature: PLY takes the mesh bundle,
+            # LAS/XYZ the point cloud, OBJ/GLB vertices and faces separately
+            # (passing the bundle to those two failed for every run).
+            if ext == ".ply":
+                formats.export_ply(path, payload)
+            elif ext == ".las":
+                formats.export_las(path, point_cloud)
+            elif ext == ".xyz":
+                formats.export_xyz(path, point_cloud)
+            elif ext == ".obj":
+                formats.export_obj(path, point_cloud.xyz, faces, colors=point_cloud.rgb)
+            elif ext == ".glb":
+                formats.export_glb(
+                    path, point_cloud.xyz, faces=faces if has_mesh else None,
+                    colors=point_cloud.rgb, confidence=point_cloud.confidence,
+                )
+            else:
+                raise ValueError(f"unsupported export format {ext!r} -- use .ply, .las, .obj, .glb or .xyz")
+            import json
+
+            path.with_suffix(path.suffix + ".quality.json").write_text(json.dumps(self._last_result.quality, indent=2))
         except Exception as exc:  # noqa: BLE001 - report, never crash the app
             QMessageBox.critical(self, "Export failed", str(exc))
             return
@@ -909,32 +1009,105 @@ class MainWindow(QMainWindow):
     def _toggle_inspector(self) -> None:
         self.inspector.parentWidget().setVisible(not self.inspector.parentWidget().isVisible())
 
-    def _measure_distance(self) -> None:
-        self.viewport.start_measure_distance()
-        self.statusBar().showMessage(
-            "Click two points in the 3D view to measure a distance.", 6000
-        )
+    _MEASURE_HINTS = {
+        "point": "Click a point on the model to read its coordinates and elevation.",
+        "distance": "Click two points on the model to measure a distance.",
+        "area": "Click the corners of an area; right-click, double-click or Enter closes it. Esc cancels.",
+        "volume": "Click around a stockpile, pit or debris; right-click or Enter closes the outline. "
+                  "The base is the plane through your corners.",
+        "profile": "Click along a route; right-click or Enter finishes the elevation profile. Backspace undoes a point.",
+    }
+
+    def _start_measure(self, kind: str) -> None:
+        self.viewport.start_measurement(kind)
+        self.statusBar().showMessage(self._MEASURE_HINTS[kind], 12000)
         self.layers_panel.sync_from_viewport(self.viewport)
 
+    def _measure_distance(self) -> None:
+        self._start_measure("distance")
+
     def _measure_area(self) -> None:
-        self.viewport.start_measure_area()
-        self.statusBar().showMessage(
-            "Click to lay down a polygon; right-click to close it and read the area.", 8000
-        )
-        self.layers_panel.sync_from_viewport(self.viewport)
+        self._start_measure("area")
 
     def _clear_measurements(self) -> None:
         self.viewport.clear_measurements()
         self.layers_panel.sync_from_viewport(self.viewport)
 
     def _on_measurement_made(self, kind: str, value: float, warning: str) -> None:
-        unit = "m²" if kind == "area" else "m"
-        message = f"measured {kind}: {value:,.3f} {unit}"
-        self.diagnostics.append_log(message)
-        self.statusBar().showMessage(message.capitalize(), 10000)
+        """Failures and warnings; finished readings are reported by ``_on_measurement_completed``."""
+        if not np.isfinite(value):
+            self.statusBar().showMessage(f"{kind.capitalize()} not measured: {warning}", 10000)
+            self.diagnostics.append_log(f"{kind} not measured: {warning}")
+            return
         if warning:
             self.diagnostics.append_log(f"WARNING: {warning}")
             QMessageBox.warning(self, "Measurement on inferred geometry", warning)
+
+    def _geo_origin(self):
+        """The run's local-frame origin as a GeoPoint, or None if it was never georeferenced."""
+        from drishti3d.types import GeoPoint
+
+        result = self._last_result
+        origin = (getattr(result, "report", None) or {}).get("georef_origin") if result is not None else None
+        if not isinstance(origin, dict):
+            out_dir = getattr(getattr(getattr(result, "config", None), "export", None), "output_dir", None)
+            try:
+                import json
+
+                origin = json.loads((Path(out_dir) / "georef.json").read_text())["origin"] if out_dir else None
+            except (OSError, KeyError, TypeError, ValueError):
+                origin = None
+        if not isinstance(origin, dict):
+            return None
+        return GeoPoint(lat=float(origin["lat"]), lon=float(origin["lon"]), alt_msl=float(origin["alt_msl"]))
+
+    def _on_measurement_completed(self, m) -> None:
+        from drishti3d.app.viewport import _measure_text
+
+        message = f"{m.label}: {_measure_text(m)}"
+        origin = self._geo_origin()
+        if m.kind == "point" and origin is not None:
+            from drishti3d.geometry.georef import enu_to_wgs84
+
+            lon, lat, alt = enu_to_wgs84(m.points[:1], origin)[0]
+            m.extra.update({"lat": float(lat), "lon": float(lon)})
+            message = f"{m.label}: {lat:.7f}, {lon:.7f}, elevation {alt:,.1f} m"
+        self.diagnostics.append_log(message)
+        self.statusBar().showMessage(message, 15000)
+        self.layers_panel.sync_from_viewport(self.viewport)
+        if m.kind == "profile":
+            from drishti3d.app.panels.profile_dialog import ProfileDialog
+
+            ProfileDialog(m, datum_m=self.viewport._height_datum_m, parent=self).show()
+
+    def _export_measurements(self) -> None:
+        measurements = self.viewport.measurements()
+        if not measurements:
+            QMessageBox.information(self, "Export Measurements", "Take a measurement first (Tools menu).")
+            return
+        origin = self._geo_origin()
+        if origin is None:
+            QMessageBox.information(
+                self, "Export Measurements",
+                "This run has no georeferencing (no GPS), so its measurements cannot be placed on a map.",
+            )
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Measurements", "measurements.geojson", "GeoJSON (*.geojson);;KML — Google Earth (*.kml)"
+        )
+        if not path:
+            return
+        from drishti3d.app.measure import write_measurements
+
+        if Path(path).suffix.lower() not in (".geojson", ".json", ".kml"):
+            path += ".geojson"
+        try:
+            write_measurements(path, measurements, origin)
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
+        self.diagnostics.append_log(f"exported {len(measurements)} measurement(s) to {path}")
+        self.statusBar().showMessage(f"Exported {len(measurements)} measurement(s) to {path}", 8000)
 
     def _on_settings_changed(self) -> None:
         config = self.settings_panel.build_config()
@@ -989,6 +1162,134 @@ class MainWindow(QMainWindow):
             event.ignore()
 
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Appearance (Tools > Preferences)
+    # ------------------------------------------------------------------
+    def _open_preferences(self) -> None:
+        dialog = PreferencesDialog(self, run_in_progress=self._thread is not None)
+        dialog.appearanceApplied.connect(self._apply_appearance)
+        dialog.exec()
+        dialog.deleteLater()
+
+    def _apply_appearance(self, palette: str, typeface: str) -> None:
+        """Adopt and save a theme/typeface, then re-theme the window.
+
+        Many panels bake colours into per-widget stylesheets when they are
+        built, so re-theming means rebuilding the window's contents. That
+        is never done under a live run -- the worker thread holds
+        references to these widgets through its signal connections -- so
+        during a run the choice is saved and applied when it finishes.
+        """
+        app = QApplication.instance()
+        theme.apply_theme(app, palette, typeface)
+        theme.save_preferences()
+        app.setWindowIcon(icons.app_icon())
+        self.setWindowIcon(icons.app_icon())
+        if self._thread is not None:
+            self._pending_appearance = True
+            self.statusBar().showMessage("Theme saved — the window re-themes when this run finishes.", 8000)
+            return
+        self._rebuild_for_appearance()
+
+    def _capture_state(self) -> dict:
+        sp = self.settings_panel
+        return {
+            "video": self._video_path,
+            "telemetry": self._telemetry_path,
+            "log": self.diagnostics.log_view.toPlainText(),
+            "inspector_tab": self.inspector.currentIndex(),
+            "inspector_visible": not self.inspector.parentWidget().isHidden(),
+            "centre_sizes": self._centre_splitter.sizes(),
+            "color_mode": next(
+                (m for m, a in self._color_mode_actions.items() if a.isChecked()), "rgb"
+            ),
+            "settings": {
+                "resolution": sp.resolution_combo.currentIndex(),
+                "window": sp.window_spin.value(),
+                "profile": sp.profile_combo.currentIndex(),
+                "reconstruction": sp.reconstruction_combo.currentData(),
+                "mesh": sp.mesh_combo.currentIndex(),
+                "semantics": sp.semantics_check.isChecked(),
+                "output": sp.output_edit.text(),
+                "timestamp": sp.timestamp_check.isChecked(),
+            },
+        }
+
+    def _restore_state(self, state: dict) -> None:
+        sp = self.settings_panel
+        s = state["settings"]
+        sp.resolution_combo.setCurrentIndex(s["resolution"])
+        sp.window_spin.setValue(s["window"])
+        sp.profile_combo.setCurrentIndex(s["profile"])
+        mode_index = sp.reconstruction_combo.findData(s.get("reconstruction", "auto"))
+        sp.reconstruction_combo.setCurrentIndex(max(0, mode_index))
+        sp.mesh_combo.setCurrentIndex(s["mesh"])
+        sp.semantics_check.setChecked(s["semantics"])
+        sp.output_edit.setText(s["output"])
+        sp.timestamp_check.setChecked(s["timestamp"])
+
+        # Paths first, without re-logging them.
+        self._video_path = state["video"]
+        self.topbar.set_video(self._video_path, self._probe_video(self._video_path))
+        self._telemetry_path = state["telemetry"]
+        self.topbar.set_telemetry(
+            self._telemetry_path,
+            Path(self._telemetry_path).suffix.lstrip(".").upper() if self._telemetry_path else "",
+        )
+        self.run_action.setEnabled(bool(self._video_path))
+
+        if self._last_result is not None:
+            self._apply_result(self._last_result)
+            self._update_counts()
+            self.layers_panel.sync_from_viewport(self.viewport)
+            self.stage_label.setText(self._last_result.outcome_label)
+        if self._run_dir is not None:
+            self.diagnostics.set_run_dir(self._run_dir, epoch=None)
+
+        # The log last, so the replayed result lines above are replaced by
+        # the original history rather than appended to it.
+        self.diagnostics.clear_log()
+        if state["log"]:
+            self.diagnostics.log_view.setPlainText(state["log"])
+            bar = self.diagnostics.log_view.verticalScrollBar()
+            bar.setValue(bar.maximum())
+
+        self.inspector.setCurrentIndex(state["inspector_tab"])
+        self.inspector.parentWidget().setVisible(state["inspector_visible"])
+        if state["centre_sizes"] and state["centre_sizes"][1] == 0:
+            self._centre_splitter.setSizes([sum(state["centre_sizes"]), 0])
+        if state["color_mode"] != "rgb":
+            self._set_color_mode(state["color_mode"])
+
+    def _rebuild_for_appearance(self) -> None:
+        """Tear down and rebuild the window contents in the active theme."""
+        self._pending_appearance = False
+        if self._thread is not None:  # a run started in the meantime
+            self._pending_appearance = True
+            return
+        state = self._capture_state()
+
+        self.diagnostics.stop()
+        self.viewport.close()
+        for action in self.actions():
+            self.removeAction(action)
+            action.deleteLater()
+        self.color_mode_group.deleteLater()
+        self.menuBar().clear()
+
+        self._build_ui()  # replaces (and deletes) the old central widget and status bar
+        self._build_menus()
+        self._wire_signals()
+        self.topbar.set_device(get_device())
+        self._restore_state(state)
+        # Like at startup, VTK needs a realised window before it renders.
+        QTimer.singleShot(0, self.viewport.start)
+        self.statusBar().showMessage(
+            f"Theme: {theme.PALETTES[theme.current_palette()].name} · "
+            f"Type: {theme.TYPEFACES[theme.current_typeface()].name}",
+            5000,
+        )
+
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
         """Never destroy a running worker thread.
 
@@ -1053,3 +1354,24 @@ class _ProgressLine(QFrame):
         layout = self.layout()
         layout.setStretch(0, filled)
         layout.setStretch(1, 1000 - filled)
+
+
+def _result_height_datum(result) -> float | None:
+    """The local frame's origin altitude for a finished or saved run (heights shown as elevations)."""
+    import json
+
+    origin = (getattr(result, "report", None) or {}).get("georef_origin")
+    if isinstance(origin, dict) and origin.get("alt_msl") is not None:
+        return float(origin["alt_msl"])
+    # Runs saved before the report carried it: the export's sidecar.
+    out_dir = getattr(getattr(getattr(result, "config", None), "export", None), "output_dir", None)
+    for candidate in [Path(out_dir) / "georef.json"] if out_dir else []:
+        try:
+            return float(json.loads(candidate.read_text())["origin"]["alt_msl"])
+        except (OSError, KeyError, TypeError, ValueError):
+            continue
+    for kf in getattr(result, "keyframes", None) or []:
+        geo = getattr(getattr(kf, "telemetry", None), "geo", None)
+        if geo is not None and geo.alt_msl is not None:
+            return float(geo.alt_msl)
+    return None

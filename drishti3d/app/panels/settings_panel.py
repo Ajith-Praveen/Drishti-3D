@@ -30,10 +30,13 @@ cluttering the screen an operator uses under time pressure.
 
 from __future__ import annotations
 
+import math
+import sys
 from pathlib import Path
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QStandardPaths, Signal
 from PySide6.QtWidgets import (
+    QDoubleSpinBox,
     QCheckBox,
     QComboBox,
     QFileDialog,
@@ -55,11 +58,19 @@ from drishti3d.config import Config
 #: crops to a multiple of its patch size anyway, so arbitrary values buy
 #: nothing and invite confusion about what actually ran.
 _RESOLUTIONS: list[tuple[str, int]] = [
-    ("518 px  — fastest, ~5 s/window", 518),
+    ("518 px  — fastest", 518),
     ("700 px  — balanced", 700),
-    ("924 px  — finer detail, ~45 s/window", 924),
+    ("924 px  — finer detail", 924),
     ("1288 px — maximum, slow", 1288),
 ]
+
+
+def _default_output_root() -> Path:
+    # Finder may launch a frozen app with cwd=/; /output is not writable.
+    if getattr(sys, "frozen", False) or Path.cwd() == Path(Path.cwd().anchor):
+        documents = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)
+        return (Path(documents) if documents else Path.home()) / "DRISHTI-3D" / "output"
+    return Path("output").resolve()
 
 #: Mesh detail presets: (label, max_mesh_faces, voxel_count_budget).
 #: Face and voxel budgets are paired deliberately -- a 776 x 853 m survey
@@ -73,6 +84,23 @@ _MESH_DETAIL: tuple[tuple[str, int, int], ...] = (
 )
 
 _PROFILES = ["fast", "balanced", "accurate"]
+
+# Coefficient counts OpenCV's distortion models accept (k1, k2, p1, p2[, k3...]).
+_DIST_LENGTHS = (4, 5, 8, 12, 14)
+
+
+def _parse_distortion(text: str) -> list[float] | None:
+    """Comma/space-separated OpenCV distortion coefficients; None when empty or malformed."""
+    parts = text.replace(",", " ").split()
+    if not parts:
+        return None
+    try:
+        values = [float(p) for p in parts]
+    except ValueError:
+        return None
+    if len(values) not in _DIST_LENGTHS or not all(math.isfinite(v) for v in values):
+        return None
+    return values
 
 
 class SettingsPanel(QWidget):
@@ -115,6 +143,84 @@ class SettingsPanel(QWidget):
         self.window_note.setObjectName("mutedNote")
         self.window_note.setWordWrap(True)
         form.addRow("", self.window_note)
+
+        self.offset_spin = QDoubleSpinBox()
+        self.offset_spin.setRange(-3600.0, 3600.0)
+        self.offset_spin.setDecimals(2)
+        self.offset_spin.setSingleStep(0.1)
+        self.offset_spin.setSpecialValueText("auto")
+        self.offset_spin.setMinimum(-3600.01)
+        self.offset_spin.setValue(-3600.01)
+        self.offset_spin.setToolTip(
+            "Seconds of flight-log time at video frame 0. 'auto' lets the\n"
+            "pipeline detect it (DJI isVideo flag or a per-frame video clock).\n"
+            "Set it when the offset was measured, e.g. 1.2 for PinPoint flight01's\n"
+            "full video. For a trimmed clip add the clip's start time: 121.2 for\n"
+            "flight01_120_480.mp4."
+        )
+        form.addRow("Telemetry offset (s):", self.offset_spin)
+
+        self.focal_spin = QDoubleSpinBox()
+        self.focal_spin.setRange(0.0, 50000.0)
+        self.focal_spin.setDecimals(1)
+        self.focal_spin.setSingleStep(10.0)
+        self.focal_spin.setSpecialValueText("auto")
+        self.focal_spin.setValue(0.0)
+        self.focal_spin.setToolTip(
+            "Known focal length in pixels at the video's resolution (the optional\n"
+            "camera intrinsics input). 'auto' estimates it from GPS baseline and\n"
+            "image motion. A known value is kept fixed during reconstruction."
+        )
+        form.addRow("Camera focal (px):", self.focal_spin)
+
+        self.dist_edit = QLineEdit()
+        self.dist_edit.setPlaceholderText("auto -- k1, k2, p1, p2[, k3] (OpenCV)")
+        self.dist_edit.setToolTip(
+            "Lens distortion of the raw video, OpenCV order. Leave empty when unknown."
+        )
+        form.addRow("Lens distortion:", self.dist_edit)
+        self.dist_note = QLabel("")
+        self.dist_note.setWordWrap(True)
+        self.dist_note.setProperty("error", True)
+        self.dist_note.hide()
+        form.addRow("", self.dist_note)
+
+        self.ref_ortho_edit = QLineEdit()
+        self.ref_ortho_edit.setPlaceholderText("off -- GeoTIFF orthophoto for absolute alignment")
+        self.ref_ortho_edit.setToolTip(
+            "Reference orthophoto (GeoTIFF). When set, the GPS-georeferenced model\n"
+            "is matched against it to remove the GPS offset (geometry.reference_align)."
+        )
+        form.addRow("Reference orthophoto:", self.ref_ortho_edit)
+        self.ref_dem_edit = QLineEdit()
+        self.ref_dem_edit.setPlaceholderText("optional -- GeoTIFF elevation model")
+        form.addRow("Reference DEM:", self.ref_dem_edit)
+
+        self.reconstruction_combo = QComboBox()
+        self.reconstruction_combo.addItem("Automatic — measured 3D (stereo + volumetric fusion)", "auto")
+        self.reconstruction_combo.addItem("Measured 3D — stereo only; fails if cameras cannot be solved", "mvs3d")
+        self.reconstruction_combo.addItem("Learned 3D — depth model with volumetric fusion", "full3d")
+        self.reconstruction_combo.addItem("Terrain 2.5D — one height per location, walls inferred", "heightfield")
+        self.reconstruction_combo.setToolTip(
+            "Automatic measures depth in every camera (plane-sweep stereo with semi-global matching),\n"
+            "keeps only depths neighbouring cameras agree on, and fuses them in 3D: trees, roofs and\n"
+            "visible walls stay 3D. Nothing unseen is invented; downward flights close small gaps under\n"
+            "canopy rims (up to 8 m, reported). If the cameras cannot be solved, Automatic falls back\n"
+            "to the learned depth model. Resolution controls stereo detail. Oblique views are needed\n"
+            "to measure façades. Terrain 2.5D is an explicit alternative for a single-height map."
+        )
+        form.addRow("Reconstruction:", self.reconstruction_combo)
+
+        self.live_windows_check = QCheckBox("Live multi-window (fuse each window as it finishes)")
+        self.live_windows_check.setChecked(True)
+        self.live_windows_check.setToolTip(
+            "Reconstruct in windows of the size above and fuse each one into\n"
+            "the model the moment it finishes, so the model grows along the\n"
+            "flight path. Windows are placed with the bundle-adjusted poses,\n"
+            "so no window-to-window fit is needed. Off: one backbone call\n"
+            "over the whole flight, nothing visible until it returns."
+        )
+        form.addRow("", self.live_windows_check)
 
         self.profile_combo = QComboBox()
         self.profile_combo.addItems(_PROFILES)
@@ -181,7 +287,7 @@ class SettingsPanel(QWidget):
 
         row = QHBoxLayout()
         row.setSpacing(6)
-        self.output_edit = QLineEdit(str(Path("output").resolve()))
+        self.output_edit = QLineEdit(str(_default_output_root()))
         self.output_edit.setToolTip(
             "Where this run writes its deliverables, stage renders and\n"
             "placement checks. The point clouds, meshes, GeoTIFFs and the\n"
@@ -215,9 +321,14 @@ class SettingsPanel(QWidget):
         self.resolution_combo.currentIndexChanged.connect(self.settingsChanged)
         self.window_spin.valueChanged.connect(self.settingsChanged)
         self.profile_combo.currentTextChanged.connect(self.settingsChanged)
+        self.reconstruction_combo.currentIndexChanged.connect(self.settingsChanged)
         self.mesh_combo.currentIndexChanged.connect(self.settingsChanged)
         self.mesh_combo.currentIndexChanged.connect(self._update_mesh_note)
         self.semantics_check.toggled.connect(self.settingsChanged)
+        self.focal_spin.valueChanged.connect(self.settingsChanged)
+        self.focal_spin.valueChanged.connect(self._validate_distortion)
+        self.dist_edit.textChanged.connect(self._validate_distortion)
+        self.dist_edit.textChanged.connect(self.settingsChanged)
         self._update_mesh_note()
 
     # -- values ---------------------------------------------------------
@@ -254,6 +365,50 @@ class SettingsPanel(QWidget):
     def semantics_enabled(self) -> bool:
         return self.semantics_check.isChecked()
 
+    @property
+    def telemetry_offset_s(self) -> float | None:
+        """The explicit offset, or ``None`` when the field is on 'auto'."""
+        v = float(self.offset_spin.value())
+        return None if v <= self.offset_spin.minimum() else v
+
+    def set_telemetry_offset(self, seconds: float | None) -> None:
+        self.offset_spin.setValue(self.offset_spin.minimum() if seconds is None else float(seconds))
+
+    @property
+    def live_windows(self) -> bool:
+        return self.live_windows_check.isChecked()
+
+    @property
+    def camera_fx(self) -> float | None:
+        """The known focal length, or ``None`` when the field is on 'auto'."""
+        v = float(self.focal_spin.value())
+        return None if v <= self.focal_spin.minimum() else v
+
+    @property
+    def dist_coeffs(self) -> list[float] | None:
+        """The typed distortion coefficients; ``None`` when empty, malformed, or without a focal.
+
+        Distortion coefficients are defined relative to a focal length, so
+        they are only passed on together with a known one.
+        """
+        if self.camera_fx is None:
+            return None
+        return _parse_distortion(self.dist_edit.text())
+
+    def _validate_distortion(self) -> None:
+        text = self.dist_edit.text().strip()
+        if not text:
+            self.dist_note.hide()
+            return
+        if _parse_distortion(text) is None:
+            self.dist_note.setText("ignored: needs 4, 5, 8, 12 or 14 numbers (k1, k2, p1, p2[, k3...])")
+        elif self.camera_fx is None:
+            self.dist_note.setText("ignored: set Camera focal too -- distortion is relative to a focal length")
+        else:
+            self.dist_note.hide()
+            return
+        self.dist_note.show()
+
     def _browse_output(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Choose Output Directory", self.output_edit.text())
         if path:
@@ -262,7 +417,7 @@ class SettingsPanel(QWidget):
     @property
     def output_root(self) -> Path:
         text = self.output_edit.text().strip()
-        return Path(text) if text else Path("output").resolve()
+        return Path(text).expanduser() if text else _default_output_root()
 
     def begin_run(self) -> None:
         """Stamp a fresh run directory. Call once, when a run starts.
@@ -326,8 +481,10 @@ class SettingsPanel(QWidget):
         geometry = apply_geometry_quality_profile(GeometryConfig(), profile)
         config.geometry = replace(
             geometry,
+            dense_method=self.reconstruction_combo.currentData(),
             max_image_size=self.max_image_size,
             window_size=self.window_size,
+            single_inference=not self.live_windows,
         )
         config.semantics = replace(config.semantics, enabled=self.semantics_enabled)
 
@@ -347,6 +504,10 @@ class SettingsPanel(QWidget):
         # export directory. Anchoring the deliverables one level down is
         # what makes that layout come out right.
         config.export = replace(config.export, output_dir=str(self.resolve_run_dir() / "output"))
+        ortho = self.ref_ortho_edit.text().strip()
+        dem = self.ref_dem_edit.text().strip()
+        config.reference = replace(config.reference, ortho_path=ortho or None, dem_path=dem or None)
+        config.ingest = replace(config.ingest, camera_fx=self.camera_fx, camera_dist_coeffs=self.dist_coeffs)
         return config
 
     def apply_config(self, config: Config) -> None:
@@ -355,11 +516,18 @@ class SettingsPanel(QWidget):
         Only the fields this panel actually exposes are adopted; the
         rest of the config stays where it is, in the YAML.
         """
+        method = config.geometry.dense_method
+        if method == "mapanything":
+            method = "full3d"
+        mode_index = self.reconstruction_combo.findData(method)
+        if mode_index >= 0:
+            self.reconstruction_combo.setCurrentIndex(mode_index)
         index = self.resolution_combo.findData(int(config.geometry.max_image_size))
         if index >= 0:
             self.resolution_combo.setCurrentIndex(index)
 
         self.window_spin.setValue(int(config.geometry.window_size))
+        self.live_windows_check.setChecked(not bool(getattr(config.geometry, "single_inference", True)))
 
         if config.quality_profile in _PROFILES:
             self.profile_combo.setCurrentText(config.quality_profile)
@@ -376,6 +544,11 @@ class SettingsPanel(QWidget):
             self.mesh_combo.setCurrentIndex(best)
 
         self.semantics_check.setChecked(bool(getattr(config.semantics, "enabled", False)))
+
+        fx = getattr(config.ingest, "camera_fx", None)
+        self.focal_spin.setValue(self.focal_spin.minimum() if fx is None else float(fx))
+        dist = getattr(config.ingest, "camera_dist_coeffs", None)
+        self.dist_edit.setText(", ".join(f"{v:g}" for v in dist) if dist else "")
 
         output_dir = getattr(config.export, "output_dir", "") or ""
         if output_dir:

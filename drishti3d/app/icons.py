@@ -17,7 +17,9 @@ grid and one stroke weight is what makes a set of icons look like a set.
 
 from __future__ import annotations
 
+import sys
 from functools import lru_cache
+from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QRectF, Qt
 from PySide6.QtGui import QColor, QIcon, QLinearGradient, QPainter, QPainterPath, QPixmap
@@ -171,7 +173,7 @@ def _pixmap(name: str, size: int, color: str, stroke: float, ratio: float) -> QP
 def icon(
     name: str,
     size: int = 18,
-    color: str = theme.TEXT_SECONDARY,
+    color: str | None = None,
     active_color: str | None = None,
     stroke: float = 1.8,
 ) -> QIcon:
@@ -181,6 +183,7 @@ def icon(
     button lights up in the accent on hover without a second asset. Left
     to ``None`` it defaults to :data:`theme.ACCENT_BRIGHT`.
     """
+    color = color or theme.TEXT_SECONDARY  # resolved per call: the palette can change
     active = active_color or theme.ACCENT_BRIGHT
     result = QIcon()
     result.addPixmap(_pixmap(name, size, color, stroke, 2.0), QIcon.Normal, QIcon.Off)
@@ -193,9 +196,9 @@ def icon(
     return result
 
 
-def pixmap(name: str, size: int = 18, color: str = theme.TEXT_SECONDARY, stroke: float = 1.8) -> QPixmap:
+def pixmap(name: str, size: int = 18, color: str | None = None, stroke: float = 1.8) -> QPixmap:
     """A single themed pixmap, for a ``QLabel`` that needs a glyph."""
-    return _pixmap(name, size, color, stroke, 2.0)
+    return _pixmap(name, size, color or theme.TEXT_SECONDARY, stroke, 2.0)
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +206,53 @@ def pixmap(name: str, size: int = 18, color: str = theme.TEXT_SECONDARY, stroke:
 # ---------------------------------------------------------------------------
 
 
+#: The logo lives in ``app/assets/logo.svg`` so it can be replaced without
+#: touching code. These two colours in the file are placeholders that are
+#: swapped for the active palette's tokens at render time, so the mark
+#: follows the theme. A replacement logo that uses other colours simply
+#: renders as drawn.
+LOGO_STROKE_PLACEHOLDER = "#E3ECEE"
+LOGO_ACCENT_PLACEHOLDER = "#36C2D4"
+
+
+def _logo_path() -> Path | None:
+    candidates = [Path(__file__).resolve().parent / "assets" / "logo.svg"]
+    frozen_root = getattr(sys, "_MEIPASS", None)
+    if frozen_root:
+        candidates.append(Path(frozen_root) / "drishti3d" / "app" / "assets" / "logo.svg")
+        candidates.append(
+            Path(frozen_root).parent / "Resources" / "drishti3d" / "app" / "assets" / "logo.svg"
+        )
+    return next((p for p in candidates if p.is_file()), None)
+
+
 def mark(size: int = 22, ratio: float = 2.0) -> QPixmap:
+    """The DRISHTI-3D mark, rendered from ``assets/logo.svg`` in the theme."""
+    path = _logo_path()
+    if path is None:
+        return _painted_mark(size, ratio)
+    markup = path.read_text(encoding="utf-8")
+    for placeholder, token in (
+        (LOGO_STROKE_PLACEHOLDER, theme.TEXT_PRIMARY),
+        (LOGO_ACCENT_PLACEHOLDER, theme.ACCENT),
+    ):
+        markup = markup.replace(placeholder, token).replace(placeholder.lower(), token)
+    renderer = QSvgRenderer(QByteArray(markup.encode("utf-8")))
+    if not renderer.isValid():
+        return _painted_mark(size, ratio)
+
+    device = max(1, int(round(size * ratio)))
+    pm = QPixmap(device, device)
+    pm.setDevicePixelRatio(ratio)
+    pm.fill(Qt.transparent)
+    painter = QPainter(pm)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    renderer.render(painter, QRectF(0, 0, size, size))
+    painter.end()
+    return pm
+
+
+def _painted_mark(size: int = 22, ratio: float = 2.0) -> QPixmap:
     """The DRISHTI-3D mark: an aperture over a survey grid.
 
     *Drishti* is sight. The mark is a stylised aperture -- a hexagonal
@@ -260,8 +309,25 @@ def mark(size: int = 22, ratio: float = 2.0) -> QPixmap:
 
 
 def app_icon() -> QIcon:
-    """Window/dock icon, at the sizes macOS and Windows actually ask for."""
+    """Window/dock icon: the mark on a dark rounded tile, at the sizes macOS asks for."""
     result = QIcon()
-    for size in (16, 24, 32, 48, 64, 128, 256, 512):
-        result.addPixmap(mark(size, ratio=1.0))
+    for size in (16, 24, 32, 48, 64, 128, 256, 512, 1024):
+        pm = QPixmap(size, size)
+        pm.fill(Qt.transparent)
+        painter = QPainter(pm)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        inset = size * 0.06
+        tile = QRectF(inset, inset, size - 2 * inset, size - 2 * inset)
+        gradient = QLinearGradient(tile.topLeft(), tile.bottomRight())
+        gradient.setColorAt(0.0, QColor(theme.BG_RAISED))
+        gradient.setColorAt(1.0, QColor(theme.BG_VOID))
+        painter.setPen(QColor(theme.BORDER_STRONG))
+        painter.setBrush(gradient)
+        radius = tile.width() * 0.225
+        painter.drawRoundedRect(tile, radius, radius)
+        glyph = int(round(tile.width() * 0.66))
+        offset = (size - glyph) / 2
+        painter.drawPixmap(int(offset), int(offset), mark(glyph, ratio=1.0))
+        painter.end()
+        result.addPixmap(pm)
     return result

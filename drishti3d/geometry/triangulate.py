@@ -174,6 +174,11 @@ def triangulate_tracks(
     return points, valid, angles
 
 
+#: Tracks each camera keeps before a ``max_points`` budget is spent on
+#: track length (see ``filter_by_reprojection``).
+_MIN_TRACKS_PER_CAMERA = 12
+
+
 def filter_by_reprojection(
     points: np.ndarray,
     trackset: TrackSet,
@@ -239,8 +244,32 @@ def filter_by_reprojection(
         # Lexsort ranks by the *last* key primarily: length descending
         # (negated), then reprojection error ascending as the tiebreaker.
         order = np.lexsort((errors[keep_idx], -lengths))
-        keep_idx = keep_idx[order[:max_points]]
-        keep_idx = np.sort(keep_idx)
+        ranked = keep_idx[order]
+        # Coverage first: every camera keeps its best few tracks before the
+        # budget is spent on length. Ranking by length alone gave 97 of 301
+        # flight01 cameras NO observation at all -- the longest tracks all
+        # sit where the flight overlaps itself -- and a camera with no
+        # observation cannot be corrected by bundle adjustment, only by its
+        # priors.
+        per_camera = max(1, min(_MIN_TRACKS_PER_CAMERA, max_points // max(1, len(poses))))
+        seen = np.zeros(len(poses), dtype=np.int64)
+        chosen: list[int] = []
+        taken = np.zeros(ranked.shape[0], dtype=bool)
+        for r, i in enumerate(ranked):
+            cams = [obs[0] for obs in trackset.tracks[i].observations]
+            if any(seen[c] < per_camera for c in cams):
+                chosen.append(int(i))
+                taken[r] = True
+                for c in cams:
+                    seen[c] += 1
+                if len(chosen) >= max_points:
+                    break
+        for r, i in enumerate(ranked):
+            if len(chosen) >= max_points:
+                break
+            if not taken[r]:
+                chosen.append(int(i))
+        keep_idx = np.sort(np.asarray(chosen, dtype=np.int64))
 
     kept_points = points[keep_idx]
     kept_tracks = TrackSet(tracks=[trackset.tracks[i] for i in keep_idx])

@@ -63,6 +63,9 @@ from drishti3d.types import Confidence, PointCloud, Pose
 
 logger = logging.getLogger(__name__)
 
+#: DSM holes up to this many cells from measured data are filled (and marked); farther is nodata.
+_DSM_PINHOLE_CELLS = 2
+
 __all__ = ["export_all"]
 
 _ALL_FORMATS = frozenset({"ply", "las", "glb", "obj", "fbx", "xyz"})
@@ -110,6 +113,105 @@ def _auto_resolution_m(xyz: np.ndarray) -> float:
     return max(max_extent / _TARGET_RASTER_CELLS, _AUTO_RESOLUTION_MIN_M)
 
 
+def _true_ortho_raster(map_xyz: np.ndarray, texture: np.ndarray, uv: np.ndarray, max_px: int = 12000):
+    """Resample a height-field true-ortho texture onto the map grid. Returns (rgb HxWx3, GeoTransform).
+
+    The texture's planar UVs belong to the vertices; georeferencing and
+    reference alignment moved the vertices by similarity transforms and the
+    map projection is conformal, so vertex map XY -> texture pixel is an
+    affine map, fitted here by least squares and checked. Texels keep their
+    ground size (~0.17 m on flight01) instead of the vertex rasterization's
+    extent-derived cell (1.3 m).
+    """
+    import cv2
+
+    from drishti3d.export.geotiff import GeoTransform
+
+    xy = np.asarray(map_xyz, dtype=np.float64)[:, :2]
+    uv = np.asarray(uv, dtype=np.float64).reshape(-1, 2)
+    if xy.shape[0] != uv.shape[0] or xy.shape[0] < 10:
+        raise ValueError("texture UVs do not pair with the exported vertices")
+    th, tw = texture.shape[:2]
+    px = np.c_[uv[:, 0] * tw - 0.5, (1.0 - uv[:, 1]) * th - 0.5]  # texel coordinates (col, row)
+    step = max(1, xy.shape[0] // 50000)
+    # Centred: map coordinates are ~1e6 m, and an uncentred [x, y, 1] design
+    # loses the texel-level precision this fit needs.
+    centre = xy.mean(axis=0)
+    A_in = np.c_[xy[::step] - centre, np.ones(xy[::step].shape[0])]
+    coef, *_ = np.linalg.lstsq(A_in, px[::step], rcond=None)  # (3, 2): [x-cx, y-cy, 1] -> (col, row)
+    resid = np.abs(A_in @ coef - px[::step]).max()
+    if resid > 2.0:
+        raise ValueError(f"vertex-to-texture map is not affine (max residual {resid:.1f} texels)")
+    lin = coef[:2].T  # 2x2: d(col,row)/d(x,y)
+    res = float(1.0 / np.sqrt(abs(np.linalg.det(lin))))  # map units per texel
+    x0, y0 = xy.min(axis=0)
+    x1, y1 = xy.max(axis=0)
+    res = max(res, float(max(x1 - x0, y1 - y0)) / max_px)
+    ncols, nrows = int(np.ceil((x1 - x0) / res)), int(np.ceil((y1 - y0) / res))
+    gx = x0 + (np.arange(ncols) + 0.5) * res
+    gy = y1 - (np.arange(nrows) + 0.5) * res
+    GX, GY = np.meshgrid(gx - centre[0], gy - centre[1])
+    map_c = (coef[0, 0] * GX + coef[1, 0] * GY + coef[2, 0]).astype(np.float32)
+    map_r = (coef[0, 1] * GX + coef[1, 1] * GY + coef[2, 1]).astype(np.float32)
+    rgb = cv2.remap(np.ascontiguousarray(texture), map_c, map_r, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    # GeoTransform origins are the CENTRE of the top-left pixel (world-file order).
+    return rgb, GeoTransform(
+        pixel_size_x=res,
+        rotation_y=0.0,
+        rotation_x=0.0,
+        pixel_size_y=-res,
+        x_origin=float(x0) + res / 2.0,
+        y_origin=float(y1) - res / 2.0,
+    )
+
+
+def _enu_to_map_fn(origin, crs: str):
+    """ENU (about ``origin``) -> ``crs`` easting/northing/ellipsoidal height, exact per point."""
+    import pyproj
+
+    from drishti3d.geometry.georef import enu_to_wgs84
+
+    to_crs = pyproj.Transformer.from_crs("EPSG:4326", crs, always_xy=True)
+
+    def fn(xyz: np.ndarray) -> np.ndarray:
+        xyz = np.asarray(xyz, dtype=np.float64).reshape(-1, 3)
+        if xyz.shape[0] == 0:
+            return xyz.copy()
+        llh = enu_to_wgs84(xyz, origin)  # (lon, lat, alt) per georef's convention
+        e, n = to_crs.transform(llh[:, 0], llh[:, 1])
+        return np.stack([e, n, llh[:, 2]], axis=1)
+
+    return fn
+
+
+def _mapped(pc: PointCloud, to_map) -> PointCloud:
+    if to_map is None or pc is None:
+        return pc
+    import dataclasses
+
+    return dataclasses.replace(pc, xyz=to_map(pc.xyz), covariance=pc.covariance)
+
+
+def _write_georef_sidecar(path: Path, origin, crs: str) -> None:
+    """How to take the local-frame mesh deliverables to map coordinates."""
+    import json
+
+    try:
+        path.write_text(
+            json.dumps(
+                {
+                    "mesh_frame": "local ENU metres (x east, y north, z up) about origin",
+                    "origin": {"lat": origin.lat, "lon": origin.lon, "alt_msl": origin.alt_msl},
+                    "map_crs": crs,
+                    "map_deliverables": "model.las, point_cloud.las, model.xyz and every .tif are in map_crs",
+                },
+                indent=2,
+            )
+        )
+    except OSError:
+        logger.warning("export_all: could not write %s", path, exc_info=True)
+
+
 def export_all(
     result_or_pointcloud: PointCloud | MeshLike,
     out_dir: str | Path,
@@ -121,6 +223,9 @@ def export_all(
     report_artifacts: dict[str, Any] | None = None,
     raw_point_cloud: PointCloud | None = None,
     report_out: dict[str, Any] | None = None,
+    geo_origin=None,
+    ortho_texture: tuple[np.ndarray, np.ndarray] | None = None,
+    uncertainty_m: np.ndarray | None = None,
 ) -> dict[str, Path]:
     """Write every deliverable ``result_or_pointcloud`` supports into ``out_dir``. Returns ``{name: path}`` actually written.
 
@@ -159,6 +264,17 @@ def export_all(
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Map-coordinate deliverables. The model arrives in local ENU about
+    # `geo_origin`; LAS, XYZ and every GeoTIFF are written in `crs` (the UTM
+    # zone) by transforming each point exactly -- ENU and UTM grid north
+    # differ by the meridian convergence (~1.5 deg at flight01), so a plain
+    # offset would be metres wrong at the edges. Mesh formats (PLY/GLB/OBJ/
+    # FBX) stay local for viewers; georef.json says how to map them.
+    to_map = None
+    if geo_origin is not None and crs:
+        to_map = _enu_to_map_fn(geo_origin, crs)
+        _write_georef_sidecar(out_dir / "georef.json", geo_origin, crs)
     written: dict[str, Path] = {}
     # Collected from the DTM/facade passes below and folded into the report
     # card, so terrain provenance ("was this ground classified semantically
@@ -176,6 +292,13 @@ def export_all(
         confidence=confidence,
         semantic_class=semantic_class,
         semantic_confidence=semantic_conf,
+        # Per-vertex height uncertainty rides separately (the mesh tuple has
+        # no slot for it) and reaches model.las as ``height_uncertainty_m``.
+        uncertainty_m=(
+            uncertainty_m
+            if uncertainty_m is not None and len(uncertainty_m) == len(xyz)
+            else getattr(result_or_pointcloud, "uncertainty_m", None)
+        ),
     )
     # The 6-tuple form (see formats.as_geometry) carries the semantic pair
     # alongside the mesh, so a meshed export keeps its per-vertex classes
@@ -183,6 +306,7 @@ def export_all(
     mesh_or_pc: PointCloud | MeshLike = (
         (xyz, faces, rgb, confidence, semantic_class, semantic_conf) if has_faces else pc
     )
+    pc_map = _mapped(pc, to_map)
 
     wanted = _ALL_FORMATS if formats is None else (set(formats) & _ALL_FORMATS)
     n = int(xyz.shape[0])
@@ -202,7 +326,7 @@ def export_all(
         if "las" in wanted:
             try:
                 path = out_dir / "model.las"
-                export_las(path, pc, crs=crs)
+                export_las(path, pc_map, crs=crs)
                 written["las"] = path
             except Exception:
                 logger.exception("export_all: LAS export failed")
@@ -237,12 +361,12 @@ def export_all(
         if "xyz" in wanted:
             try:
                 path = out_dir / "model.xyz"
-                export_xyz(path, pc)
+                export_xyz(path, pc_map)
                 written["xyz"] = path
             except Exception:
                 logger.exception("export_all: XYZ export failed")
 
-        res = resolution_m if resolution_m is not None else _auto_resolution_m(xyz)
+        res = resolution_m if resolution_m is not None else _auto_resolution_m(pc_map.xyz)
 
     if raw_point_cloud is not None and raw_point_cloud.xyz.shape[0] > 0:
         raw_pc = PointCloud(
@@ -262,7 +386,7 @@ def export_all(
 
         try:
             path = out_dir / "point_cloud.las"
-            export_las(path, raw_pc, crs=crs)
+            export_las(path, _mapped(raw_pc, to_map), crs=crs)
             written["point_cloud_las"] = path
         except Exception:
             logger.exception("export_all: raw fused point-cloud LAS export failed")
@@ -270,10 +394,22 @@ def export_all(
     if n > 0:
         dsm = None
         try:
-            dsm, transform, _filled = point_cloud_to_dsm(pc, resolution_m=res)
+            dsm, transform, filled = point_cloud_to_dsm(pc_map, resolution_m=res)
+            # Cells the model never observed are nodata beyond pinhole range
+            # of real data: a nearest-neighbour surface stretched across
+            # ground the camera did not see is invented height (it was ~half
+            # of the raster on flight01). Pinholes stay filled and, like the
+            # DTM's, are marked in dsm_interpolated.tif.
+            from scipy import ndimage
+
+            far = filled & (ndimage.distance_transform_edt(filled) > _DSM_PINHOLE_CELLS)
+            dsm = np.where(far, np.nan, dsm)
             path = out_dir / "dsm.tif"
             write_geotiff(path, dsm.astype(np.float32), transform, crs=crs, nodata=float("nan"))
             written["dsm"] = path
+            path = out_dir / "dsm_interpolated.tif"
+            write_geotiff(path, (filled & ~far).astype(np.uint8), transform, crs=crs)
+            written["dsm_interpolated"] = path
         except Exception:
             logger.info("export_all: DSM raster not written", exc_info=True)
 
@@ -282,7 +418,7 @@ def export_all(
         # is a deliverable in its own right: under every building the
         # ground elevation is a guess, and a user measuring a cutting depth
         # has to be able to see that.
-        dtm_source = raw_pc if raw_point_cloud is not None and raw_pc.semantic_class is not None else pc
+        dtm_source = _mapped(raw_pc, to_map) if raw_point_cloud is not None and raw_pc.semantic_class is not None else pc_map
         try:
             dtm_result = dtm_from_point_cloud(dtm_source, resolution_m=res)
             path = out_dir / "dtm.tif"
@@ -327,9 +463,19 @@ def export_all(
             except Exception:
                 logger.info("export_all: facade completion not written", exc_info=True)
 
-        if rgb is not None:
+        wrote_true_ortho = False
+        if ortho_texture is not None:
             try:
-                ortho, transform, _filled = point_cloud_to_orthomosaic(pc, resolution_m=res)
+                ortho, transform = _true_ortho_raster(pc_map.xyz, *ortho_texture)
+                path = out_dir / "orthomosaic.tif"
+                write_geotiff(path, ortho, transform, crs=crs, nodata=0)
+                written["orthomosaic"] = path
+                wrote_true_ortho = True
+            except Exception:
+                logger.warning("export_all: true-ortho raster failed; rasterizing vertex colour instead", exc_info=True)
+        if rgb is not None and not wrote_true_ortho:
+            try:
+                ortho, transform, _filled = point_cloud_to_orthomosaic(pc_map, resolution_m=res)
                 path = out_dir / "orthomosaic.tif"
                 write_geotiff(path, ortho, transform, crs=crs)
                 written["orthomosaic"] = path
@@ -338,7 +484,7 @@ def export_all(
 
         if confidence is not None:
             try:
-                conf_raster, transform, _filled = point_cloud_to_confidence_raster(pc, resolution_m=res)
+                conf_raster, transform, _filled = point_cloud_to_confidence_raster(pc_map, resolution_m=res)
                 path = out_dir / "confidence.tif"
                 write_geotiff(path, conf_raster.astype(np.float32), transform, crs=crs)
                 written["confidence_raster"] = path

@@ -55,6 +55,29 @@ class KeyframeImageCache:
         #: Per keyframe: stored_size / original_size. A consumer that needs
         #: intrinsics for a cached image must scale them by this.
         self.scales = scales
+        #: Set once ``undistort`` has remapped the stored images.
+        self.undistorted = False
+
+    def undistort(self, K_native: np.ndarray, dist_coeffs: np.ndarray) -> None:
+        """Remap every cached image through the lens model, once.
+
+        ``K_native`` is the camera matrix at native resolution; each image
+        uses it scaled by that image's own cache scale, and keeps it as its
+        pinhole camera matrix afterwards (see ``VideoSource.set_undistortion``).
+        """
+        import cv2
+
+        if self.undistorted:
+            return
+        dist = np.asarray(dist_coeffs, dtype=np.float64).reshape(-1)
+        for index, image in list(self._images.items()):
+            s = self.scale_for(index)
+            K = np.asarray(K_native, dtype=np.float64).copy()
+            K[:2] *= s
+            h, w = image.shape[:2]
+            maps = cv2.initUndistortRectifyMap(K, dist, None, K, (w, h), cv2.CV_16SC2)
+            self._images[index] = cv2.remap(image, *maps, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+        self.undistorted = True
 
     def __len__(self) -> int:
         return len(self._images)
@@ -68,6 +91,36 @@ class KeyframeImageCache:
 
     def nbytes(self) -> int:
         return sum(im.nbytes for im in self._images.values())
+
+
+def cache_from_decoded(state, images_by_frame: dict[int, np.ndarray], max_size: int = _DEFAULT_MAX_SIZE):
+    """Build the cache from full-resolution frames triage already decoded.
+
+    Returns ``None`` unless EVERY keyframe is present -- a partial cache
+    would send some stages down the slow per-frame path without saying so;
+    the caller then runs ``build_keyframe_cache`` instead.
+    """
+    from drishti3d.geometry.mapanything import resize_preserving_aspect
+
+    if not state.keyframes or not images_by_frame:
+        return None
+    images: dict[int, np.ndarray] = {}
+    scales: dict[int, float] = {}
+    for pos, kf in enumerate(state.keyframes):
+        bgr = images_by_frame.get(int(kf.frame_index))
+        if bgr is None:
+            return None
+        resized, scale = resize_preserving_aspect(bgr, max_size) if max(bgr.shape[:2]) > max_size else (bgr, 1.0)
+        images[pos] = resized
+        scales[pos] = scale
+    cache = KeyframeImageCache(images, max_size, scales)
+    logger.info(
+        "keyframe cache: %d keyframes taken from the triage scan at <=%dpx (%.0f MB); no second decode pass",
+        len(images),
+        max_size,
+        cache.nbytes() / 1e6,
+    )
+    return cache
 
 
 def build_keyframe_cache(state, max_size: int = _DEFAULT_MAX_SIZE) -> KeyframeImageCache | None:

@@ -66,6 +66,7 @@ class StageSpec:
 STAGE_SPECS: tuple[StageSpec, ...] = (
     StageSpec("ingest", "Ingest", "decode video, align telemetry"),
     StageSpec("triage", "Triage", "select sharp, well-spaced keyframes"),
+    StageSpec("time_sync", "Clock sync", "check telemetry timing against image motion", optional=True),
     StageSpec("drone_path", "Flight path", "where the drone flew"),
     StageSpec("coverage", "Coverage", "which ground the camera saw"),
     StageSpec("semantics", "Semantics", "per-pixel classes, dynamic masking", optional=True),
@@ -370,10 +371,10 @@ class StageRail(QWidget):
             return
         row.set_state(_RESULT_STATUS.get(status, DONE), message=message, elapsed=elapsed)
 
-    def finish(self, note: str = "") -> None:
+    def finish(self, note: str = "", *, successful: bool = True) -> None:
         for row in self._rows.values():
             if row.state == RUNNING:
-                row.set_state(DONE)
+                row.set_state(DONE if successful else SKIPPED)
         self._pulse_timer.stop()
         for row in self._rows.values():
             row.set_pulse(0.0)

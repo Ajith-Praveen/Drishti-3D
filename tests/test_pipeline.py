@@ -48,6 +48,19 @@ _PAD = 60
 _METERS_PER_DEG_LAT = 111320.0
 
 
+@pytest.fixture(autouse=True)
+def _skip_ba_for_tiled_video(monkeypatch):
+    # This fixture pans independent tiles and assigns arbitrary GPS: it has no
+    # single physical camera model. Exercise pipeline wiring here; physical BA
+    # recovery/rejection has its own projected-scene tests.
+    from drishti3d.pipeline.stages import MatchingStage, StageUnavailable
+
+    def unavailable(*args, **kwargs):
+        raise StageUnavailable("tiled pipeline fixture has no physical camera model")
+
+    monkeypatch.setattr(MatchingStage, "run", unavailable)
+
+
 def _base_texture(seed: int = 11) -> np.ndarray:
     rng = np.random.default_rng(seed)
     base = rng.integers(0, 256, size=(_HEIGHT + _PAD, _WIDTH + _PAD), dtype=np.uint8)
@@ -165,6 +178,7 @@ def _fast_config() -> Config:
     cfg.triage.max_frames_scanned = 200
     cfg.triage.min_baseline_m = 1.0
     cfg.triage.baseline_to_altitude_ratio = 0.02
+    cfg.triage.forward_overlap = 0  # fixture has no physical ground footprint
     cfg.geometry.window_size = 3
     # Fix 2 raised the production default from 518 to 924px, which would
     # *upscale* this fixture's tiny native 240x160 frames (see _WIDTH/
@@ -182,6 +196,25 @@ def _fast_config() -> Config:
 # ---------------------------------------------------------------------------
 # End-to-end run with the null backbone
 # ---------------------------------------------------------------------------
+
+
+def test_unavailable_backbone_never_exports_synthetic_geometry(video_path, telemetry_path, monkeypatch):
+    from types import SimpleNamespace
+
+    requested = []
+
+    def unavailable(name, **kwargs):
+        requested.append(name)
+        return SimpleNamespace(is_available=lambda: False)
+
+    monkeypatch.setattr("drishti3d.pipeline.stages.get_backbone", unavailable)
+    cfg = _fast_config()
+    cfg.geometry.dense_method = "full3d"
+    result = run_pipeline(video_path, telemetry_path=telemetry_path, config=cfg, backbone="mapanything")
+    assert requested == ["mapanything"]
+    assert result.stage("geometry").status == "failed"
+    assert result.stage("export").status == "skipped"
+    assert result.point_cloud is None or not len(result.point_cloud.xyz)
 
 
 def test_run_pipeline_completes_end_to_end_with_null_backbone(video_path: Path, telemetry_path: Path) -> None:
@@ -207,11 +240,12 @@ def test_run_pipeline_completes_end_to_end_with_null_backbone(video_path: Path, 
     assert statuses["ingest"] == "ok"
     assert statuses["triage"] == "ok"
     assert statuses["geometry"] == "ok"
-    # bundle/fusion/export are owned by other, concurrently-in-progress
-    # workstreams -- allow either "ok" (already landed) or "skipped" (not
-    # yet), but the run must never fail or abort because of them.
-    for name in ("bundle_adjustment", "fusion", "export"):
+    # Failed placement in this nonphysical fixture must now mark fusion as
+    # failed, while preserving diagnostic geometry and allowing its export.
+    for name in ("bundle_adjustment", "export"):
         assert statuses[name] in ("ok", "skipped")
+    assert statuses["fusion"] == "failed"
+    assert result.outcome == "failed"
 
     assert result.report["cancelled"] is False
     assert result.report["backbone"] == "null"
@@ -286,7 +320,7 @@ def test_pipeline_result_save_load_round_trip_empty_result(tmp_path: Path) -> No
 
 
 def test_full_run_with_telemetry_populates_real_report_values(
-    video_path: Path, telemetry_path: Path, tmp_path: Path
+    video_path: Path, telemetry_path: Path, tmp_path: Path, monkeypatch
 ) -> None:
     """report.txt must carry real numbers for reprojection error, coverage, and stage timings.
 
@@ -298,6 +332,15 @@ def test_full_run_with_telemetry_populates_real_report_values(
     .ExportStage.run`` and ``_georeference_for_report``).
     """
     from drishti3d.export.report import NOT_COMPUTED
+    from drishti3d.pipeline.stages import PosePriorStage
+
+    def measured_prior(self, state, *args, **kwargs):
+        # Known measurement tests report propagation independently of the
+        # intentionally nonphysical video fixture's feature matches.
+        state.mean_reprojection_error_px = 1.25
+        return {"rmse_after_px": 1.25}, "fixture measurement"
+
+    monkeypatch.setattr(PosePriorStage, "run", measured_prior)
 
     config = _fast_config()
     export_dir = tmp_path / "export_out"
@@ -306,7 +349,8 @@ def test_full_run_with_telemetry_populates_real_report_values(
     result = run_pipeline(video_path, telemetry_path=telemetry_path, config=config, backbone="null")
 
     statuses = {sr.name: sr.status for sr in result.stage_results}
-    assert statuses["bundle_adjustment"] == "ok", "test fixture must actually exercise bundle adjustment"
+    assert statuses["pose_prior"] == "ok"
+    assert statuses["bundle_adjustment"] == "skipped"
     assert statuses["export"] == "ok"
 
     export_sr = next(sr for sr in result.stage_results if sr.name == "export")
@@ -319,6 +363,7 @@ def test_full_run_with_telemetry_populates_real_report_values(
     reproj_line = next(line for line in report_text.splitlines() if line.startswith("Mean reprojection error:"))
     assert NOT_COMPUTED not in reproj_line
     assert "px" in reproj_line
+    assert "1.25" in reproj_line
 
     # Coverage: a real percentage from triage.
     coverage_line = next(line for line in report_text.splitlines() if line.startswith("Coverage:"))
@@ -327,8 +372,7 @@ def test_full_run_with_telemetry_populates_real_report_values(
 
     # Stage timings: at least the stages that ran before export.
     assert "Stage timings:" in report_text
-    timings_idx = report_text.splitlines().index("Stage timings:")
-    timings_block = "\n".join(report_text.splitlines()[timings_idx:])
+    timings_block = report_text.split("Stage timings:\n", 1)[1].split("\nReference alignment", 1)[0]
     assert NOT_COMPUTED not in timings_block
     for stage_name in ("ingest", "triage", "geometry", "bundle_adjustment"):
         assert f"{stage_name}:" in timings_block
@@ -377,9 +421,9 @@ def test_cli_export_writes_under_out_directory_not_cwd(
         "ERROR",
     ]
     rc = runner.main(argv)
-    assert rc == 0
+    assert rc == 1  # failed placement is diagnostic output, not a successful reconstruction
 
-    exported_dir = out_dir / "output"
+    exported_dir = out_dir / "output" / "diagnostic"
     assert exported_dir.is_dir(), f"expected deliverables under {exported_dir}, found nothing there"
     assert (exported_dir / "report.txt").exists()
     assert (exported_dir / "report.html").exists()
@@ -475,7 +519,10 @@ def test_optional_stage_exception_is_recorded_failed_and_does_not_abort_run(
     fake_tsdf.fuse_submaps = _boom  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "drishti3d.fusion.tsdf", fake_tsdf)
 
-    result = run_pipeline(video_path, telemetry_path=telemetry_path, config=_fast_config(), backbone="null")
+    config = _fast_config()
+    # This test is about the failure path, not the placement gate in front of it.
+    config.fusion.allow_failed_placement = True
+    result = run_pipeline(video_path, telemetry_path=telemetry_path, config=config, backbone="null")
 
     statuses = {sr.name: sr.status for sr in result.stage_results}
     assert statuses["fusion"] == "failed"
@@ -564,7 +611,7 @@ def test_triage_stage_populates_keyframe_pose_from_telemetry(
     from drishti3d.types import Pose
 
     sentinel_pose = Pose(R=np.eye(3), t=np.array([1.0, 2.0, 3.0]))
-    monkeypatch.setattr(stages_mod, "_poses_from_telemetry", lambda keyframes: [sentinel_pose] * len(keyframes))
+    monkeypatch.setattr(stages_mod, "_poses_from_telemetry", lambda keyframes, **_kw: [sentinel_pose] * len(keyframes))
 
     result = run_pipeline(video_path, telemetry_path=telemetry_path, config=_fast_config(), backbone="null")
 
@@ -631,6 +678,7 @@ def test_geometry_stage_resizes_images_and_scales_intrinsics_for_every_backbone(
 
     cfg = Config()
     cfg.geometry.window_size = 1
+    cfg.geometry.dense_method = "full3d"
     cfg.geometry.max_image_size = 400
 
     state = PipelineState(
@@ -677,7 +725,7 @@ def test_matching_config_reaches_the_stage(tmp_path):
 
     fast = cfg_for("fast")
     assert _match_cfg(fast, "detect_scale", 1.0) == 0.5
-    assert _match_cfg(fast, "max_points_in_ba", None) == 2000
+    assert _match_cfg(fast, "max_points_in_ba", None) == 6000
     assert _match_cfg(fast, "ba_max_iterations", 100) == 50
     assert _match_cfg(fast, "max_features", 4000) == 2000
 

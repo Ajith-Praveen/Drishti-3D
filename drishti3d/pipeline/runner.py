@@ -10,13 +10,11 @@ plumbing, and deciding which stage failures are fatal.
 
 Fail-fast vs. record-and-continue
 ----------------------------------
-Ingest and triage are load-bearing: without an opened video and a set of
-keyframes there is nothing for any later stage to do, so a failure there
-stops the run immediately (the returned ``PipelineResult`` still carries
-whatever ran before the failure, with every remaining stage recorded as
-``"skipped"``). Geometry, bundle adjustment, fusion, and export are
-best-effort: geometry always falls back to ``NullBackbone`` rather than
-failing (see ``stages.GeometryStage``), and bundle/fusion/export are
+Ingest, triage, camera refinement and geometry are load-bearing: failure stops the run with
+every remaining stage recorded as ``"skipped"``. Geometry never substitutes
+synthetic output for a missing reconstruction model. Unavailable camera
+refinement may skip, but a rejected solution stops dense geometry/export.
+Fusion/export are
 optional stages owned by other, concurrently-in-progress workstreams that
 may not exist yet (``StageUnavailable`` -> recorded as ``"skipped"``) --
 either way, a failure in any of the four never aborts the run; it's
@@ -62,6 +60,7 @@ from drishti3d.pipeline.stages import (
     SemanticsStage,
     PosePriorStage,
     StageUnavailable,
+    TimeSyncStage,
     TriageStage,
 )
 from drishti3d.types import PointCloud
@@ -130,11 +129,30 @@ def _preview_snapshot(state, stage_name: str, artifacts: dict | None) -> dict:
     if sparse is not None and len(sparse):
         snapshot["sparse_points"] = sparse
 
+    datum = height_datum_m(state)
+    if datum is not None:
+        snapshot["height_datum_m"] = datum
+
     return snapshot
 
-# Stages whose failure stops the whole run: without an opened video and a
-# keyframe list there is nothing for geometry/bundle/fusion/export to do.
-_FATAL_STAGE_NAMES = frozenset({"ingest", "triage"})
+
+def height_datum_m(state) -> float | None:
+    """Altitude of the local frame's origin: add it to z for elevations from the flight log's datum.
+
+    The ENU origin is the first geo-tagged keyframe (``ingest.telemetry.
+    telemetry_to_enu``) until georeferencing records the exact one.
+    """
+    origin = getattr(state, "georef_origin", None)
+    if origin is not None:
+        return float(origin.alt_msl)
+    for kf in getattr(state, "keyframes", None) or []:
+        geo = getattr(getattr(kf, "telemetry", None), "geo", None)
+        if geo is not None and np.isfinite(geo.alt_msl):
+            return float(geo.alt_msl)
+    return None
+
+# Without real input and geometry there is no reconstruction to export.
+_FATAL_STAGE_NAMES = frozenset({"ingest", "triage", "geometry", "pose_prior", "bundle_adjustment"})
 
 
 def _build_stages() -> list[PipelineStage]:
@@ -142,6 +160,9 @@ def _build_stages() -> list[PipelineStage]:
     return [
         IngestStage(),
         TriageStage(),
+        # Clock check against the keyframes' own image rotation, before any
+        # stage uses a telemetry timestamp (TimeSyncStage). Never fatal.
+        TimeSyncStage(),
         # Ordered previews in front of the expensive stages: path, then
         # coverage, then placement. Each answers one question from data
         # that already exists and renders it, so a flight that cannot
@@ -321,6 +342,8 @@ def run_pipeline(
     # docstring. ``export.report.build_report`` is what actually surfaces
     # this in the accuracy report card.
     state.stage_timings_s = {}
+    # Wall-clock origin for "time to first fused patch" (GeometryStage).
+    state.run_t0 = time.monotonic()
 
     stages = _build_stages()
     # ingest + triage only, per the dry-run contract -- but every stage
@@ -331,6 +354,7 @@ def run_pipeline(
     )
 
     stage_results: list[StageResult] = []
+    state.stage_results = stage_results
     cancelled = False
 
     def _emit_partial() -> None:
@@ -379,6 +403,10 @@ def run_pipeline(
             # of inference to test. Loading is keyed and refused on any
             # mismatch; saving never fails the run.
             cached = None
+            if stage_name == "geometry":
+                from drishti3d.pipeline.stages import _validate_telemetry_clock
+
+                _validate_telemetry_clock(state)
             if stage_name == "geometry" and geometry_cache_dir:
                 from drishti3d.pipeline.geometry_cache import load_geometry_cache
 
@@ -443,8 +471,27 @@ def run_pipeline(
 
     report: dict = dict(state.report)
     report["cancelled"] = cancelled
-    report["backbone"] = state.backbone_name
+    report["backbone"] = (
+        "mvs3d" if getattr(state, "geometry_premeshed", False)
+        else "heightfield_mvs" if getattr(state, "heightfield_diagnostics", None)
+        else state.backbone_name
+    )
+    report["reconstruction_representation"] = (
+        "2.5D height-field surface" if getattr(state, "geometry_heightmap", False)
+        else "3D volumetric mesh" if state.mesh_faces is not None and len(state.mesh_faces)
+        else "3D point cloud (no mesh)"
+    )
     report["keyframes_selected"] = len(state.keyframes)
+    origin = getattr(state, "georef_origin", None)
+    if origin is not None:
+        # The local ENU frame's origin, so a viewer can label heights in
+        # metres above sea level instead of relative to the first GPS fix.
+        report["georef_origin"] = {
+            "lat": float(origin.lat), "lon": float(origin.lon), "alt_msl": float(origin.alt_msl),
+        }
+    if getattr(state, "first_patch_s", None) is not None:
+        report["first_fused_patch_s"] = round(state.first_patch_s, 1)
+    report["total_runtime_s"] = round(time.monotonic() - state.run_t0, 1)
     for key, value in state.triage_report.items():
         report[f"triage_{key}"] = value
     # Surfaced at the top level (not only inside ingest's own StageResult)
@@ -459,7 +506,7 @@ def run_pipeline(
     if "telemetry_video_coverage_fraction" in state.telemetry_stats:
         report["telemetry_video_coverage_fraction"] = state.telemetry_stats["telemetry_video_coverage_fraction"]
 
-    return PipelineResult(
+    result = PipelineResult(
         keyframes=state.keyframes,
         submaps=state.submaps,
         point_cloud=state.point_cloud,
@@ -473,6 +520,8 @@ def run_pipeline(
         video_path=str(state.video_path),
         telemetry_path=str(state.telemetry_path) if state.telemetry_path else None,
     )
+    result.report.update(result.quality)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -522,6 +571,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--config", type=str, default=None, help="Path to a pipeline config YAML.")
     parser.add_argument(
+        "--dense-method", choices=("full3d", "heightfield", "auto", "mapanything", "mvs3d"),
+        help="auto/mvs3d: measured volumetric stereo; full3d: learned depth; heightfield: explicit terrain 2.5D.",
+    )
+    parser.add_argument(
         "--backbone",
         type=str,
         default=None,
@@ -540,6 +593,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--max-keyframes", type=int, default=None, help="Cap the number of keyframes triage selects.")
+    camera = parser.add_argument_group(
+        "known camera calibration",
+        "Optional. Replaces the metadata/camera-database/HFOV guess (provenance 'user'), which "
+        "focal-from-flow and bundle adjustment then leave alone.",
+    )
+    camera.add_argument("--fx", type=float, default=None, help="Focal length in pixels.")
+    camera.add_argument("--fy", type=float, default=None, help="Vertical focal length in pixels (default: --fx).")
+    camera.add_argument("--cx", type=float, default=None, help="Principal point x in pixels (default: image centre).")
+    camera.add_argument("--cy", type=float, default=None, help="Principal point y in pixels (default: image centre).")
+    camera.add_argument("--hfov", type=float, default=None, help="Horizontal field of view in degrees (used when --fx is not given).")
+    camera.add_argument(
+        "--dist",
+        type=str,
+        default=None,
+        help="Distortion of the raw video, OpenCV order: 'k1,k2,p1,p2[,k3]'.",
+    )
+    camera.add_argument(
+        "--calibration-width",
+        type=int,
+        default=None,
+        help="Image width the calibration was made at, when it differs from the video's.",
+    )
+    camera.add_argument("--camera-model", type=str, default=None, help="Camera database key, e.g. 'dji mavic 3'.")
     parser.add_argument("--dry-run", action="store_true", help="Run only ingest + triage; skip geometry/fusion/export.")
     parser.add_argument(
         "--snapshot-dir",
@@ -571,6 +647,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _apply_camera_overrides(config: Config, args: argparse.Namespace) -> None:
+    """Layer the CLI's known-calibration flags over ``config.ingest``."""
+    ingest = config.ingest
+    for flag, field_name in (
+        ("fx", "camera_fx"),
+        ("fy", "camera_fy"),
+        ("cx", "camera_cx"),
+        ("cy", "camera_cy"),
+        ("hfov", "camera_hfov_deg"),
+        ("calibration_width", "camera_calibration_width"),
+        ("camera_model", "camera_model"),
+    ):
+        value = getattr(args, flag, None)
+        if value is not None:
+            setattr(ingest, field_name, value)
+    if getattr(args, "dist", None) is not None:
+        try:
+            ingest.camera_dist_coeffs = [float(v) for v in args.dist.replace(" ", "").split(",") if v]
+        except ValueError as exc:
+            raise SystemExit(f"--dist: expected comma-separated numbers, got {args.dist!r}") from exc
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     setup_logging(level=args.log_level)
@@ -578,6 +676,9 @@ def main(argv: list[str] | None = None) -> int:
     config = load_config(args.config) if args.config else Config()
     if args.max_keyframes is not None:
         config.triage.target_keyframes = args.max_keyframes
+    _apply_camera_overrides(config, args)
+    if args.dense_method is not None:
+        config.geometry.dense_method = args.dense_method
 
     if args.out:
         # ``ExportStage`` (see pipeline.stages) resolves
@@ -643,8 +744,9 @@ def main(argv: list[str] | None = None) -> int:
         result.save(args.out)
         print(f"\nSaved result to {args.out}")
 
-    fatal_failed = any(sr.status == "failed" and sr.name in _FATAL_STAGE_NAMES for sr in result.stage_results)
-    return 1 if fatal_failed else 0
+    if result.outcome == "cancelled":
+        return 130
+    return 1 if result.outcome == "failed" else 0
 
 
 if __name__ == "__main__":

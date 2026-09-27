@@ -134,7 +134,7 @@ class TelemetrySample:
     geo: GeoPoint | None = None
     gimbal_pitch: float | None = None
     gimbal_roll: float | None = None
-    gimbal_yaw: float | None = None
+    gimbal_yaw: float | None = None  # compass heading: clockwise from North, degrees
     imu_accel: np.ndarray | None = None
     imu_gyro: np.ndarray | None = None
     baro_alt: float | None = None
@@ -205,6 +205,13 @@ class PointCloud:
     # number this project refuses to ship -- a 0.95 "building" and a 0.34
     # "building" are not the same claim.
     semantic_confidence: np.ndarray | None = None  # (N,) float32 in [0, 1]
+
+    # Per-point height uncertainty in metres, measured where the surface was
+    # chosen (``geometry.heightfield``: the farthest height from the chosen
+    # one that multi-view stereo still could not rule out). NaN where a
+    # point was not measured (filled holes). ``None`` when the producer has
+    # no such measurement -- the backbone path reports ``covariance``.
+    uncertainty_m: np.ndarray | None = None  # (N,) float32
 
 
 @dataclass

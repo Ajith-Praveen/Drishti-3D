@@ -1,0 +1,79 @@
+# Tests on Linux, Windows and macOS, then the desktop builds for all three.
+# Windows and Linux builds carry NVIDIA CUDA torch; GitHub's runners have no
+# GPU, so the bundles are smoke-tested on the CPU.
+name: build
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Qt/VTK system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libgl1 libegl1 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 \
+            libxcb-keysyms1 libxcb-shape0 libxcb-xinerama0 libxcb-randr0 libxcb-render-util0 ffmpeg
+      - run: uv sync --extra gui --extra ml --extra semantics --extra reference
+      - name: tests (Linux, virtual display)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a uv run --no-sync pytest -q -p no:cacheprovider
+      - name: tests
+        if: runner.os != 'Linux'
+        run: uv run --no-sync pytest -q -p no:cacheprovider
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            script: powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1
+            artifact: dist/DRISHTI-3D-windows-x64.zip
+          - os: ubuntu-24.04
+            script: ./packaging/build_linux.sh
+            artifact: dist/DRISHTI-3D-linux-x86_64.tar.gz
+          - os: macos-14
+            script: ./packaging/build_app.sh && ditto -c -k --keepParent dist/DRISHTI-3D.app dist/DRISHTI-3D-macos-arm64.zip
+            artifact: dist/DRISHTI-3D-macos-arm64.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Qt/VTK system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1 libegl1 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 \
+            libxcb-keysyms1 libxcb-shape0 libxcb-xinerama0 libxcb-randr0 libxcb-render-util0 ffmpeg
+      - name: macOS environment
+        if: runner.os == 'macOS'
+        run: uv sync --extra gui --extra ml --extra semantics --extra reference && uv pip install pyinstaller
+      - name: build
+        run: ${{ matrix.script }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.os }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
+
+  docker:
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: build the Linux + NVIDIA image
+        run: docker build -f packaging/Dockerfile -t drishti3d:cuda .
+      - name: smoke test (CPU)
+        run: docker run --rm drishti3d:cuda runtime check --skip-hash

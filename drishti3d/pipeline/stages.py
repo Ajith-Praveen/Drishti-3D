@@ -5,10 +5,9 @@ Every stage shares one signature (see ``PipelineStage.run``) so
 ``StageResult`` for each of them uniformly, without special-casing any
 particular stage.
 
-Ingest / triage / geometry are the stages this workstream owns end to end
-and that must always work with zero GPU (geometry falls back to
-``NullBackbone`` -- see its module docstring -- whenever the configured
-backbone isn't installed/available). Bundle adjustment, fusion, and export
+Geometry requires the selected backbone. Synthetic ``NullBackbone`` output
+is available only when explicitly requested, never as an automatic fallback.
+Bundle adjustment, fusion, and export
 are owned by two other, concurrently-in-progress workstreams
 (``drishti3d.geometry.bundle``, ``drishti3d.fusion``, ``drishti3d.export``);
 those modules do not exist yet (or exist but are still empty) at the time
@@ -25,6 +24,7 @@ from __future__ import annotations
 import concurrent.futures
 import contextlib
 import logging
+import time
 import queue
 import threading
 import traceback
@@ -46,11 +46,12 @@ from drishti3d.geometry.flight_profile import FlightProfile, analyze_flight_prof
 from drishti3d.geometry.mapanything import resize_preserving_aspect, scale_intrinsics
 from drishti3d.geometry.submap import merge_submaps, strategy_report
 from drishti3d.geometry.windows import Window, plan_window_size, plan_windows
-from drishti3d.ingest.intrinsics import intrinsics_from_video
+from drishti3d.ingest.intrinsics import intrinsics_from_config, intrinsics_from_video
 from drishti3d.ingest.telemetry import load_telemetry
 from drishti3d.ingest.video import VideoSource
 from drishti3d.triage.selector import select_keyframes, triage_report
 from drishti3d.types import (
+    Confidence,
     CameraIntrinsics,
     FrameMetrics,
     Keyframe,
@@ -169,6 +170,17 @@ _MATCH_RATIO = 0.8
 # flight that passes near its own earlier track).
 _MATCH_WINDOW = 3
 _MATCH_GPS_RADIUS_M = 15.0
+#: Loop-closure radius as a share of the along-track image footprint
+#: (triage.footprint), when it was measured, and the nearest loop pairs kept
+#: per keyframe. OFF (0): on PinPoint flight01 a 0.45 footprint radius tied
+#: the neighbouring strips (depth disagreement between them 3.1 -> 0.3 m,
+#: camera track vs COLMAP 1.61 -> 1.12 m) but bent the block against the
+#: independent IGN orthophoto (internal distortion 0.92 -> 1.99 m, survey
+#: rays 3.9 -> 5.3 m) -- consistent with rolling shutter, whose skew flips
+#: between strips flown in opposite directions and which the rigid camera
+#: model cannot absorb. Enable once the camera model handles it.
+_MATCH_FOOTPRINT_FRACTION = 0.0
+_MATCH_LOOP_PAIRS_PER_FRAME = 3
 
 # A verified pair needs at least this many inlier correspondences to be
 # trusted as a track-building edge -- matches the minimal-sample floor
@@ -206,6 +218,24 @@ _MAX_REPROJECTION_PX_PREBA = 60.0
 # ``pipeline.stages``' module docstring) rather than handing bundle_adjust
 # a problem it cannot meaningfully solve.
 _MIN_TRACKS_FOR_BA = 20
+
+#: A camera needs this many observations before bundle adjustment may
+#: move it. Below it the images do not pose the camera (flight01's
+#: turn-boundary keyframes: 1-3 observations each) and "refinement" is
+#: noise; such cameras keep their telemetry pose and are reported.
+_MIN_CAMERA_OBSERVATIONS = 15
+
+#: A refined camera further than this many GPS sigmas from its own fix
+#: is treated as mis-posed by the images: its observations are dropped
+#: and the solve repeated.
+_CAMERA_GPS_OUTLIER_SIGMAS = 4.0
+
+#: Bundle adjustment fails outright when more than this fraction of the
+#: cameras cannot be posed from the images. Below it they are dropped from
+#: dense geometry and the gate judges the posed ones (flight01's 12-camera
+#: clip: 3 banking/turn frames; DJI_1001: its last 13 keyframes disagree
+#: with a log that records no altitude change).
+_MAX_UNREFINED_CAMERA_FRACTION = 1.0 / 3.0
 
 #: Bounds on the focal-length correction bundle adjustment may apply.
 #: The intrinsics prior is a generic-HFOV guess, so a real correction of
@@ -308,6 +338,16 @@ class PipelineState:
     telemetry_stats: dict = field(default_factory=dict)
     intrinsics: CameraIntrinsics | None = None
     intrinsics_provenance: str = ""
+    # The raw video's lens once it is known (supplied or solved by the pose
+    # prior): ``dist_coeffs`` (OpenCV order), native ``K`` and its source.
+    # From then on every frame the pipeline decodes is undistorted and
+    # ``intrinsics`` / ``Keyframe.intrinsics`` describe that pinhole image
+    # (same K, no distortion). See ``_install_lens``.
+    lens_distortion: dict | None = None
+    # Keyframes bundle adjustment could not pose from the images (too few
+    # observations, or pulled far from their GPS fix). They keep their
+    # telemetry pose and must not contribute dense geometry.
+    unrefined_keyframes: list[int] = field(default_factory=list)
 
     keyframes: list[Keyframe] = field(default_factory=list)
     frame_metrics: list[FrameMetrics] = field(default_factory=list)
@@ -424,7 +464,16 @@ class IngestStage(PipelineStage):
 
         if progress_cb:
             progress_cb(2, 3, "resolving camera intrinsics")
-        intrinsics, provenance = intrinsics_from_video(video, telemetry=(telemetry_samples, telemetry_stats))
+        ingest_cfg = state.config.ingest
+        user_intrinsics = intrinsics_from_config(ingest_cfg, video.width, video.height)
+        if user_intrinsics is not None:
+            intrinsics, provenance = user_intrinsics
+        else:
+            intrinsics, provenance = intrinsics_from_video(
+                video,
+                telemetry=(telemetry_samples, telemetry_stats),
+                camera_model=getattr(ingest_cfg, "camera_model", None),
+            )
         state.intrinsics = intrinsics
         state.intrinsics_provenance = provenance
 
@@ -497,7 +546,33 @@ def _gps_enu_by_keyframe(keyframes: list[Keyframe]) -> dict[int, np.ndarray]:
     return enu_by_idx
 
 
-def _poses_from_telemetry(keyframes: list[Keyframe]) -> list[Pose | None]:
+def _course_yaw_by_keyframe(enu_by_idx: dict[int, np.ndarray], n: int, min_step_m: float = 1.0) -> dict[int, float]:
+    """Yaw (``gimbal_to_R`` convention) that puts the top of a nadir image along the direction of travel.
+
+    ``gimbal_to_R(yaw, -90, 0)`` points the image's up direction along
+    ``(-sin yaw, cos yaw)`` in (east, north), so ``yaw = atan2(-dE, dN)``.
+    The course at keyframe ``i`` is taken across its neighbours
+    (``i-1 -> i+1``) to smooth GPS jitter; keyframes where the drone moved
+    less than ``min_step_m`` (hover) inherit the nearest measured course.
+    """
+    yaws: dict[int, float] = {}
+    idx = sorted(enu_by_idx)
+    for pos, i in enumerate(idx):
+        a = enu_by_idx[idx[max(pos - 1, 0)]]
+        b = enu_by_idx[idx[min(pos + 1, len(idx) - 1)]]
+        d = np.asarray(b, dtype=np.float64) - np.asarray(a, dtype=np.float64)
+        if float(np.hypot(d[0], d[1])) >= min_step_m:
+            yaws[i] = float(np.degrees(np.arctan2(-d[0], d[1])))
+    if not yaws:
+        return {}
+    known = np.array(sorted(yaws))
+    for i in idx:
+        if i not in yaws:
+            yaws[i] = yaws[int(known[np.argmin(np.abs(known - i))])]
+    return yaws
+
+
+def _poses_from_telemetry(keyframes: list[Keyframe], assume_nadir: bool = False) -> list[Pose | None]:
     """Build a rough world-from-camera ``Pose`` per keyframe from its own GPS + gimbal telemetry.
 
     This is THE fix for the pipeline's headline metric-scale bug: MapAnything
@@ -548,6 +623,26 @@ def _poses_from_telemetry(keyframes: list[Keyframe]) -> list[Pose | None]:
 
     enu_by_idx = _gps_enu_by_keyframe(keyframes)
 
+    # No gimbal columns anywhere in the log (e.g. a per-frame GPS export):
+    # with ``assume_nadir`` the camera is taken as straight down and yawed
+    # along the GPS course. Only ever for a log with NO orientation at all
+    # -- a partial gimbal log is never overridden -- and the caller must
+    # have established the footage is nadir. geometry.yaw_from_flow and
+    # the pose-prior bundle adjustment then refine both angles.
+    no_gimbal_at_all = all(
+        kf.telemetry is None or (kf.telemetry.gimbal_pitch is None and kf.telemetry.gimbal_yaw is None)
+        for kf in keyframes
+    )
+    course_yaw = _course_yaw_by_keyframe(enu_by_idx, len(keyframes)) if assume_nadir and no_gimbal_at_all else {}
+    if course_yaw:
+        logger.warning(
+            "triage: telemetry has no gimbal orientation -- ASSUMING a nadir camera yawed along the GPS "
+            "course for %d/%d keyframes (geometry.assume_nadir_without_gimbal). Flow-yaw and bundle "
+            "adjustment refine this; disable it for oblique footage.",
+            len(course_yaw),
+            len(keyframes),
+        )
+
     poses: list[Pose | None] = []
     for i, kf in enumerate(keyframes):
         position = enu_by_idx.get(i)
@@ -555,10 +650,15 @@ def _poses_from_telemetry(keyframes: list[Keyframe]) -> list[Pose | None]:
         pitch = telemetry.gimbal_pitch if telemetry is not None else None
         yaw = telemetry.gimbal_yaw if telemetry is not None else None
         roll = telemetry.gimbal_roll if telemetry is not None else None
+        if position is not None and pitch is None and yaw is None and i in course_yaw:
+            pitch, yaw, roll = -90.0, course_yaw[i], 0.0
         if position is None or pitch is None or yaw is None:
             poses.append(None)
             continue
-        R = gimbal_to_R(yaw_deg=yaw, pitch_deg=pitch, roll_deg=roll if roll is not None else 0.0)
+        # Telemetry headings are clockwise from North; internal ENU yaw is
+        # counterclockwise. Course-derived fallback is already internal yaw.
+        internal_yaw = yaw if i in course_yaw else -yaw
+        R = gimbal_to_R(yaw_deg=internal_yaw, pitch_deg=pitch, roll_deg=roll if roll is not None else 0.0)
         poses.append(Pose(R=R, t=position))
 
     return poses
@@ -585,8 +685,16 @@ class TriageStage(PipelineStage):
                 progress_cb(current, total, message)
 
         telemetry = (state.telemetry_samples, state.telemetry_stats) if state.telemetry_samples else None
+        full_res: dict[int, np.ndarray] = {}
+        triage_diag: dict = {}
         keyframes, all_metrics = select_keyframes(
-            state.video, state.config.triage, telemetry=telemetry, progress_cb=_inner_progress, intrinsics=state.intrinsics
+            state.video,
+            state.config.triage,
+            telemetry=telemetry,
+            progress_cb=_inner_progress,
+            intrinsics=state.intrinsics,
+            full_res_sink=full_res,
+            diag_out=triage_diag,
         )
 
         # Seed each keyframe with the ingest-stage intrinsics prior when
@@ -603,7 +711,8 @@ class TriageStage(PipelineStage):
         # before this line existed -- every `Keyframe.pose` was `None`,
         # silently disabling pose conditioning entirely regardless of how
         # much good telemetry was available.
-        for kf, pose in zip(keyframes, _poses_from_telemetry(keyframes), strict=True):
+        assume_nadir = bool(getattr(state.config.geometry, "assume_nadir_without_gimbal", True))
+        for kf, pose in zip(keyframes, _poses_from_telemetry(keyframes, assume_nadir=assume_nadir), strict=True):
             kf.pose = pose
 
         state.keyframes = keyframes
@@ -613,16 +722,20 @@ class TriageStage(PipelineStage):
         # geometry each re-decode all of them -- measured at 144 s per
         # pass on this footage. See pipeline.framecache.
         if getattr(state.config.triage, "cache_keyframe_images", True):
-            from drishti3d.pipeline.framecache import build_keyframe_cache
+            from drishti3d.pipeline.framecache import build_keyframe_cache, cache_from_decoded
 
-            state.keyframe_cache = build_keyframe_cache(
-                state, max_size=getattr(state.config.triage, "keyframe_cache_max_size", 1920)
+            max_size = getattr(state.config.triage, "keyframe_cache_max_size", 1920)
+            # The lazy GPS scan already holds every keyframe's full-resolution
+            # pixels; only fall back to a second decode pass when it doesn't.
+            state.keyframe_cache = cache_from_decoded(state, full_res, max_size) or build_keyframe_cache(
+                state, max_size=max_size
             )
         state.frame_metrics = all_metrics
 
         has_gps = any(kf.telemetry is not None and kf.telemetry.geo is not None for kf in keyframes)
         spacing_mode = "gps_baseline" if has_gps else "vision_parallax"
         report = triage_report(keyframes, all_metrics, spacing_mode=spacing_mode)
+        report.update(triage_diag)
         state.triage_report = report
 
         artifacts = {
@@ -640,6 +753,136 @@ class TriageStage(PipelineStage):
 # ---------------------------------------------------------------------------
 # SemanticsStage
 # ---------------------------------------------------------------------------
+
+
+class TimeSyncStage(PipelineStage):
+    """Check the video<->telemetry clock against the keyframes' own image rotation (ingest.timesync).
+
+    Runs right after triage, whose keyframe cache already holds the decoded
+    pixels, so the check costs one ORB similarity fit per neighbouring
+    keyframe pair. What happens with a confident measurement depends on how
+    the offset in use was obtained and on ``ingest.auto_sync``:
+
+    - unmeasured (``assumed_zero``): replaced. Every telemetry timestamp,
+      keyframe telemetry sample and seed pose is rebuilt on the corrected
+      clock, and the offset is recorded with source ``"image_motion"``;
+    - explicit or auto-detected: kept -- the operator's value wins -- but a
+      disagreement above ``auto_sync_warn_s`` is reported on the stage and
+      the report card; ``auto_sync = "correct"`` applies it anyway;
+    - stamped on the video clock (DJI SRT, per-frame CSV): skipped.
+
+    Never fatal: a flight with no turns inside the keyframe span, or no
+    heading telemetry, records why it could not measure and moves on.
+    """
+
+    name = "time_sync"
+
+    def run(self, state, cancel_token, progress_cb, partial_cb=None):
+        from drishti3d.ingest import timesync
+
+        cfg = state.config.ingest
+        mode = str(getattr(cfg, "auto_sync", "auto")).lower()
+        if mode == "off":
+            raise StageUnavailable("ingest.auto_sync is off")
+        if not state.telemetry_samples:
+            raise StageUnavailable("no telemetry to synchronise")
+        stats = state.telemetry_stats
+        source = stats.get("offset_source", "assumed_zero")
+        if source == "video_clock" and mode != "correct":
+            raise StageUnavailable("telemetry is stamped on the video clock; nothing to measure")
+        cache = getattr(state, "keyframe_cache", None)
+        keyframes = state.keyframes
+        if cache is None or len(keyframes) < 4:
+            raise StageUnavailable("needs at least 4 cached keyframe images")
+
+        images = [cache.get(i) for i in range(len(keyframes))]
+        times = [kf.timestamp for kf in keyframes]
+        tel_t = [s.timestamp for s in state.telemetry_samples]
+        if source == "assumed_zero":
+            # Unknown offset: any lag that keeps the keyframes inside the log.
+            lag_range = (min(tel_t) - max(times), max(tel_t) - min(times))
+        else:
+            span = float(getattr(cfg, "auto_sync_search_s", 10.0))
+            lag_range = (-span, span)
+
+        def _progress(done: int, total: int) -> None:
+            _check_cancel(cancel_token)
+            if progress_cb:
+                progress_cb(done, total, f"image rotation {done}/{total} keyframe pairs")
+
+        estimate = timesync.estimate_from_keyframes(
+            images, times, state.telemetry_samples, lag_range, progress=_progress
+        )
+        if estimate is None:
+            raise StageUnavailable("could not measure keyframe rotation or logged heading")
+
+        offset_before = float(stats.get("time_offset_s", 0.0))
+        measured = offset_before + estimate.lag_s
+        apply = estimate.confident and (mode == "correct" or source == "assumed_zero")
+        warn_s = float(getattr(cfg, "auto_sync_warn_s", 0.75))
+        disagrees = estimate.confident and abs(estimate.lag_s) > warn_s
+        if apply:
+            _shift_telemetry_clock(state, estimate.lag_s)
+        stats["time_sync"] = {
+            **estimate.as_dict(),
+            "applied": apply,
+            "offset_before_s": round(offset_before, 3),
+            "offset_measured_s": round(measured, 3),
+            "disagrees": bool(disagrees and not apply),
+        }
+
+        artifacts = {"time_sync": stats["time_sync"]}
+        if apply:
+            message = (
+                f"telemetry clock corrected by {estimate.lag_s:+.2f} s from image motion: offset "
+                f"{offset_before:.2f} -> {measured:.2f} s ({estimate.turning_pairs} turning pairs, "
+                f"residual {estimate.median_residual_deg:.1f} deg)"
+            )
+        elif not estimate.confident:
+            message = f"image motion could not confirm the telemetry clock: {estimate.reason}"
+        elif disagrees:
+            message = (
+                f"WARNING: image motion puts the telemetry {estimate.lag_s:+.2f} s off the {source} offset "
+                f"({offset_before:.2f} s -> {measured:.2f} s measured); kept the {source} value -- set "
+                "ingest.auto_sync: correct, or pass the measured offset, if it is wrong"
+            )
+        else:
+            message = (
+                f"telemetry clock agrees with image motion to {estimate.lag_s:+.2f} s "
+                f"({estimate.turning_pairs} turning pairs)"
+            )
+        logger.info("time sync: %s", message)
+        return artifacts, message
+
+
+def _shift_telemetry_clock(state, lag_s: float) -> None:
+    """Move every telemetry timestamp ``lag_s`` earlier and rebuild what triage derived from them."""
+    import dataclasses
+
+    from drishti3d.ingest.telemetry import resample_telemetry
+
+    state.telemetry_samples = [dataclasses.replace(s, timestamp=s.timestamp - lag_s) for s in state.telemetry_samples]
+    stats = state.telemetry_stats
+    stats["time_offset_s"] = float(stats.get("time_offset_s", 0.0)) + lag_s
+    stats["offset_source"] = "image_motion"
+    duration = getattr(state.video, "duration", None)
+    if duration:
+        t = [s.timestamp for s in state.telemetry_samples]
+        overlap = max(0.0, min(max(t), duration) - max(min(t), 0.0))
+        stats["telemetry_video_coverage_fraction"] = min(1.0, overlap / duration)
+    resampled = resample_telemetry(state.telemetry_samples, [kf.timestamp for kf in state.keyframes])
+    for kf, sample in zip(state.keyframes, resampled, strict=True):
+        kf.telemetry = sample
+    assume_nadir = bool(getattr(state.config.geometry, "assume_nadir_without_gimbal", True))
+    for kf, pose in zip(state.keyframes, _poses_from_telemetry(state.keyframes, assume_nadir=assume_nadir), strict=True):
+        kf.pose = pose
+
+
+def _ground_level_checkpoint(checkpoint: str | None) -> bool:
+    """A segmentation checkpoint trained on ground-level photos (ADE20K, Cityscapes), not aerial imagery."""
+    name = str(checkpoint or "").lower()
+    aerial = ("uavid", "visdrone", "aerial", "isaid", "potsdam", "vaihingen", "loveda", "udd", "aeroscapes", "drone")
+    return any(t in name for t in ("ade", "cityscapes")) and not any(t in name for t in aerial)
 
 
 class SemanticsStage(PipelineStage):
@@ -687,6 +930,14 @@ class SemanticsStage(PipelineStage):
             raise StageUnavailable("no keyframes to segment")
         if state.video is None:
             raise StageUnavailable("SemanticsStage requires an opened VideoSource")
+        poses = [kf.pose for kf in keyframes if getattr(kf, "pose", None) is not None]
+        if (cfg.model == "segformer" and getattr(cfg, "skip_nadir_ground_level", True)
+                and _ground_level_checkpoint(cfg.checkpoint) and poses and _is_nadir(poses)):
+            raise StageUnavailable(
+                f"downward-looking flight: {cfg.checkpoint} is trained on ground-level photos and finds no "
+                "vehicles or people from above (0% on DJI_1001); moving objects are removed by multi-view "
+                "consistency instead. Set semantics.checkpoint to an aerial model to segment this flight."
+            )
 
         # Imported here, not at module scope: `semantics.segmenter` pulls
         # in torch/transformers only when a real segmenter is constructed,
@@ -1057,7 +1308,12 @@ def _anchor_window(state, result, images, intrinsics_list, poses_list, cfg, inde
     """
     if result is None or not getattr(cfg, "depth_anchor", False):
         return result
-    from drishti3d.geometry.depth_anchor import anchor_depth_fused
+    if getattr(state, "geometry_world_frame", False) and getattr(cfg, "ba_depth_fit", True):
+        # The per-view BA fit that runs next measures scale from thousands
+        # of triangulated points and overrides this pass entirely; the
+        # parallax anchor's own feature matching was ~15 s per window.
+        return result
+    from drishti3d.geometry.depth_anchor import anchor_depth_fused, anchor_depth_to_parallax
 
     # Per-view telemetry altitude, for the GPS half of the fusion.
     #
@@ -1174,6 +1430,195 @@ def _anchor_window(state, result, images, intrinsics_list, poses_list, cfg, inde
     return anchored
 
 
+def _densify_fit_points(state, poses) -> None:
+    """Re-triangulate EVERY matched track with the refined poses, for the per-view depth fit.
+
+    Bundle adjustment is capped (fast profile: 2,000 points) because it
+    only has to fix the cameras. The depth fit needs the opposite: many
+    points per view. On the sample flight 2,000 BA points over 80 cameras
+    left most views below the fit's sample floor and windows without a fit
+    landed at the wrong height (263 m ground spread). DLT triangulation of
+    all ~17k tracks against the already-refined poses costs well under a
+    second and gives every view several times the samples, with the same
+    reprojection gate the BA input used. Results go to ``state.fit_points``
+    / ``fit_obs_*``; BA's own arrays are untouched.
+    """
+    trackset = getattr(state, "matching_trackset", None)
+    intrinsics_list = getattr(state, "matching_intrinsics", None)
+    if trackset is None or intrinsics_list is None or not poses:
+        return
+    unrefined = set(getattr(state, "unrefined_keyframes", None) or [])
+    if unrefined:
+        trackset = _tracks_without_cameras(trackset, unrefined)
+    try:
+        from drishti3d.geometry import triangulate as triangulate_mod
+
+        points, valid, _angles = triangulate_mod.triangulate_tracks(
+            trackset, poses, intrinsics_list, min_angle_deg=_MIN_TRIANGULATION_ANGLE_DEG
+        )
+        from drishti3d.geometry.tracks import TrackSet
+
+        kept = TrackSet(tracks=[t for t, keep in zip(trackset.tracks, valid, strict=True) if keep])
+        points, kept = triangulate_mod.filter_by_reprojection(
+            points[valid], kept, poses, intrinsics_list, max_px=_MAX_REPROJECTION_PX_PREBA, max_points=None
+        )
+        cams: list[int] = []
+        pts: list[int] = []
+        for pi, track in enumerate(kept.tracks):
+            for frame_idx, _kp, _uv in track.observations:
+                cams.append(int(frame_idx))
+                pts.append(pi)
+        state.fit_points = np.asarray(points, dtype=np.float64)
+        state.fit_obs_camera_idx = np.asarray(cams, dtype=np.int64)
+        state.fit_obs_point_idx = np.asarray(pts, dtype=np.int64)
+        logger.info(
+            "depth fit points: %d tracks re-triangulated with refined poses (%d observations) for the per-view depth fit",
+            len(kept.tracks),
+            len(cams),
+        )
+    except Exception:
+        logger.warning("depth fit points: re-triangulation failed; the fit uses BA points only", exc_info=True)
+
+
+#: Returned by ``_fit_window_to_ba`` for a window left out of the
+#: world-frame model (distinct from ``None``, which is "no result at all").
+_EXCLUDED_WINDOW = object()
+
+
+def _fit_window_to_ba(state, result, window, cfg, index: int):
+    """Fit each view's depth to the pose-prior BA points it observed (geometry.depth_fit).
+
+    Runs after ``_anchor_window``: the parallax anchor gets depth roughly
+    right, this pass makes each view agree with the bundle adjustment.
+    Returns the (possibly refitted) result; a crash or missing BA leaves it
+    unchanged. The per-view outcome lands in
+    ``state.depth_anchor_diags[index]["ba_fit"]``.
+    """
+    if result is None or window is None or not getattr(cfg, "ba_depth_fit", True):
+        return result
+    # Prefer the dense re-triangulation (see _densify_fit_points).
+    if getattr(state, "fit_points", None) is not None and len(state.fit_points):
+        ba_points, cam_idx, pt_idx = state.fit_points, state.fit_obs_camera_idx, state.fit_obs_point_idx
+    else:
+        ba_points = getattr(state, "ba_points", None)
+        cam_idx = getattr(state, "ba_obs_camera_idx", None)
+        pt_idx = getattr(state, "ba_obs_point_idx", None)
+    world_poses = getattr(state, "poses", None) or []
+    if ba_points is None or cam_idx is None or pt_idx is None or len(ba_points) == 0:
+        if getattr(state, "geometry_world_frame", False):
+            logger.warning("geometry: window %d has no metric fit observations; excluding local-frame depth", index)
+            return _EXCLUDED_WINDOW
+        return result
+
+    from drishti3d.geometry.depth_fit import ba_points_in_camera, fit_view_depth
+
+    try:
+        depth = np.array(result.depth, dtype=np.float64, copy=True)
+        per_view: list[dict] = []
+        applied = 0
+        for v, k in enumerate(window.keyframe_indices()):
+            entry: dict = {"view": v, "keyframe": int(k)}
+            if k >= len(world_poses) or world_poses[k] is None:
+                entry["failure"] = "no refined world pose"
+                per_view.append(entry)
+                continue
+            cam = ba_points_in_camera(ba_points, cam_idx, pt_idx, int(k), world_poses[k])
+            fit = fit_view_depth(
+                depth[v],
+                result.intrinsics[v],
+                cam,
+                min_samples=int(getattr(cfg, "ba_depth_fit_min_samples", 30)),
+                spatial=bool(getattr(cfg, "ba_depth_fit_spatial", True)),
+            )
+            entry.update(fit.as_dict())
+            per_view.append(entry)
+            if fit.applied:
+                depth[v] = fit.apply(depth[v])
+                applied += 1
+        fitted = [e for e in per_view if e.get("applied")]
+        if fitted and applied < len(per_view):
+            # A view without enough samples of its own inherits its
+            # window's median fit: its neighbours share most of its ground.
+            a_med = float(np.median([e["scale"] for e in fitted]))
+            b_med = float(np.median([e["shift_m"] for e in fitted]))
+            for v, e in enumerate(per_view):
+                if not e.get("applied") and "keyframe" in e:
+                    valid = depth[v] > 1e-6
+                    depth[v][valid] = a_med * depth[v][valid] + b_med
+                    depth[v][depth[v] <= 1e-6] = 0.0
+                    e["inherited"] = True
+        summary = {"views": len(per_view), "applied": applied, "per_view": per_view}
+        scales = [e["scale"] for e in per_view if e.get("applied")]
+        if scales:
+            summary["scale_median"] = float(np.median(scales))
+            summary["scale_min"] = float(np.min(scales))
+            summary["scale_max"] = float(np.max(scales))
+        from collections import Counter
+
+        reasons = Counter(
+            (e.get("failure") or "").split(" (")[0].split(" outside")[0].split(" exceeds")[0]
+            for e in per_view
+            if not e.get("applied")
+        )
+        samples = [e.get("samples", 0) for e in per_view]
+        residuals = [e["residual_m"] for e in per_view if e.get("applied") and e.get("residual_m") is not None]
+        summary["residual_median_m"] = float(np.median(residuals)) if residuals else None
+        logger.info(
+            "geometry: window %d BA depth fit applied to %d/%d views (median scale %s; fit residual %s m; BA samples/view %s; refused: %s)",
+            index,
+            applied,
+            len(per_view),
+            f"{summary['scale_median']:.3f}" if scales else "n/a",
+            f"{summary['residual_median_m']:.2f}" if residuals else "n/a",
+            f"{int(np.median(samples))}" if samples else "n/a",
+            dict(reasons) or "none",
+        )
+    except Exception:
+        logger.warning("geometry: window %d BA depth fit crashed; keeping anchored depth", index, exc_info=True)
+        return result
+
+    diags = getattr(state, "depth_anchor_diags", None)
+    if diags is not None:
+        diags.setdefault(index, {})["ba_fit"] = summary
+    if getattr(state, "geometry_world_frame", False):
+        if applied == 0:
+            # No view could be fitted: its depth is the parallax anchor's
+            # guess, which on this footage ranged 1.25-14x. Placed with BA
+            # poses it lands metres from its neighbours, so it is left out
+            # of the world-frame model rather than allowed to corrupt it.
+            logger.warning("geometry: window %d has no BA-fitted view; excluded from the world-frame model", index)
+            return _EXCLUDED_WINDOW
+        # Re-cast every pixel from its bundle-adjusted camera: the submap
+        # is then already in the world frame (see GeometryConfig.ba_world_frame).
+        from dataclasses import replace
+
+        ba_poses = [world_poses[k] for k in window.keyframe_indices()]
+        fitted_result = _points_from_depth(replace(result, poses=ba_poses), depth)
+        # _anchor_window deliberately skips world-frame windows. Refine only
+        # now: depth and camera baselines finally share the same metric frame.
+        if getattr(cfg, "plane_sweep", False) and fitted_result.images is not None:
+            from drishti3d.geometry.plane_sweep import refine_depth_by_plane_sweep
+
+            try:
+                sweep = refine_depth_by_plane_sweep(
+                    np.asarray(fitted_result.images), np.asarray(fitted_result.depth),
+                    list(fitted_result.poses), list(fitted_result.intrinsics),
+                    device=_plane_sweep_device(),
+                    n_hypotheses=int(getattr(cfg, "plane_sweep_hypotheses", 48)),
+                    range_fraction=float(getattr(cfg, "plane_sweep_range_fraction", 0.15)),
+                    min_ncc=float(getattr(cfg, "plane_sweep_min_ncc", 0.5)),
+                )
+                fitted_result = _points_from_depth(fitted_result, sweep.depth)
+                if diags is not None:
+                    diags.setdefault(index, {})["plane_sweep"] = sweep.stats
+            except Exception:
+                logger.warning("geometry: window %d plane sweep failed; keeping BA-fitted depth", index, exc_info=True)
+        return fitted_result
+    if applied == 0:
+        return result
+    return _points_from_depth(result, depth)
+
+
 def _match_cfg(state, name: str, fallback):
     """Read a ``MatchingConfig`` field, falling back to this module's constant.
 
@@ -1222,16 +1667,19 @@ def _points_from_depth(result, depth: np.ndarray):
     from dataclasses import replace
 
     points = np.array(result.points, dtype=np.float64, copy=True)
+    confidence = np.array(result.confidence, copy=True)
     for v, (pose, intr) in enumerate(zip(result.poses, result.intrinsics, strict=False)):
         d = np.asarray(depth[v], dtype=np.float64)
         h, w = d.shape
         ys, xs = np.meshgrid(np.arange(h) + 0.5, np.arange(w) + 0.5, indexing="ij")
         rays = np.stack([(xs - intr.cx) / intr.fx, (ys - intr.cy) / intr.fy, np.ones_like(xs)], axis=-1)
         cam = rays * d[..., None]
-        valid = d > 1e-6
+        valid = np.isfinite(d) & (d > 1e-6)
         world = cam @ np.asarray(pose.R, dtype=np.float64).T + np.asarray(pose.t, dtype=np.float64)
         points[v][valid] = world[valid]
-    return replace(result, points=points, depth=np.asarray(depth, dtype=np.float64))
+        points[v][~valid] = np.nan
+        confidence[v][~valid] = 0
+    return replace(result, points=points, depth=np.asarray(depth, dtype=np.float64), confidence=confidence)
 
 
 def _refine_yaw_from_flow(state, keyframes, cfg_geometry) -> dict:
@@ -1252,6 +1700,19 @@ def _refine_yaw_from_flow(state, keyframes, cfg_geometry) -> dict:
         logger.info("geometry: yaw-from-flow unavailable (%s); keeping telemetry yaw", exc)
         return {"enabled": False, "failure": str(exc)}
 
+    # The flow measures how the image turns about the optical axis, which is
+    # the heading only for a camera looking (nearly) straight down. A level,
+    # forward-facing camera turns about its vertical image axis instead: on
+    # Front_View_Light (gimbal pitch 0) it replaced 11 of 12 compass headings
+    # with values a median 96 deg off (IQR 218 deg).
+    pitches = [kf.telemetry.gimbal_pitch for kf in keyframes if kf.telemetry is not None and kf.telemetry.gimbal_pitch is not None]
+    if pitches and abs(float(np.median(pitches)) + 90.0) > 25.0:
+        logger.info(
+            "geometry: yaw-from-flow skipped -- gimbal pitch %.0f deg is not nadir; keeping the logged heading",
+            float(np.median(pitches)),
+        )
+        return {"enabled": False, "failure": f"camera not nadir (gimbal pitch {float(np.median(pitches)):.0f} deg)"}
+
     max_size = int(getattr(cfg_geometry, "yaw_flow_max_size", 640))
     cache = getattr(state, "keyframe_cache", None)
     images: list = []
@@ -1268,7 +1729,7 @@ def _refine_yaw_from_flow(state, keyframes, cfg_geometry) -> dict:
     positions = [kf.pose.t if kf.pose is not None else None for kf in keyframes]
     pitch = [kf.telemetry.gimbal_pitch if kf.telemetry is not None else None for kf in keyframes]
     roll = [kf.telemetry.gimbal_roll if kf.telemetry is not None else None for kf in keyframes]
-    prior = [kf.telemetry.gimbal_yaw if kf.telemetry is not None else None for kf in keyframes]
+    prior = [-kf.telemetry.gimbal_yaw if kf.telemetry is not None and kf.telemetry.gimbal_yaw is not None else None for kf in keyframes]
 
     try:
         yaws, diag = estimate_yaw_from_flow(images, positions, pitch, roll, prior)
@@ -1345,6 +1806,43 @@ def _submap_from_result(state, window, result, index: int) -> tuple[Submap, int]
             if removed:
                 logger.info("geometry: window %d dropped %d/%d points as dynamic/sky", index, removed, keep.size)
 
+    # Single emission (world-frame mode): a keyframe that sits in several
+    # overlapping windows is reconstructed once per window, each time with
+    # its own regressed-depth error, and fusing every copy stacks slightly
+    # different surfaces. The overlap is kept as backbone CONTEXT, but only
+    # the owning window -- the one where the keyframe is furthest from an
+    # edge -- emits its points.
+    owners = getattr(state, "view_owner", None)
+    if owners and view_index is not None and getattr(state, "geometry_world_frame", False):
+        kf_of_view = np.asarray(window.keyframe_indices())
+        dense = getattr(state, "dense_views", None)
+        owned_views = np.array(
+            [owners.get(int(k)) == index and (dense is None or int(k) in dense) for k in kf_of_view]
+        )
+        own = owned_views[view_index]
+        if not own.all():
+            # Keep the non-owned views aside (thinned): if their owning
+            # window later fails or is excluded, they are the only copy.
+            spares = getattr(state, "spare_views", None)
+            if spares is not None:
+                for v in np.unique(view_index[~own]):
+                    k = int(kf_of_view[v])
+                    if k in spares:
+                        continue
+                    sel = np.nonzero(view_index == v)[0]
+                    if sel.size > _SPARE_POINTS_PER_VIEW:
+                        sel = np.sort(np.random.default_rng(k).choice(sel, _SPARE_POINTS_PER_VIEW, replace=False))
+                    spares[k] = (
+                        window,
+                        submap_xyz[sel].copy(),
+                        submap_conf[sel].copy(),
+                        None if result_rgb is None else result_rgb[sel].copy(),
+                        result.poses[int(v)],
+                    )
+            submap_xyz, submap_conf, view_index = submap_xyz[own], submap_conf[own], view_index[own]
+            if result_rgb is not None:
+                result_rgb = result_rgb[own]
+
     # Bound the window's contribution. Memory downstream (merge, outlier
     # removal, photometric verification) is linear in point count, and
     # with the backbone's edge mask off a 956 px window can emit ~4M
@@ -1380,6 +1878,181 @@ def _submap_from_result(state, window, result, index: int) -> tuple[Submap, int]
         view_index=view_index,
     )
     return submap, removed
+
+
+def _footprint_polygon(pose, intr, ground_z: float) -> np.ndarray | None:
+    """The image's four corners projected onto the plane z = ground_z (world XY), or None if any misses it."""
+    corners = [(0.0, 0.0), (intr.width, 0.0), (intr.width, intr.height), (0.0, intr.height)]
+    R, t = np.asarray(pose.R, dtype=float), np.asarray(pose.t, dtype=float).reshape(3)
+    out = []
+    for u, v in corners:
+        d = R @ np.array([(u - intr.cx) / intr.fx, (v - intr.cy) / intr.fy, 1.0])
+        if d[2] >= -1e-6:
+            return None
+        s = (ground_z - t[2]) / d[2]
+        if s <= 0:
+            return None
+        out.append((t + s * d)[:2])
+    return np.asarray(out)
+
+
+def _select_dense_views(state, keyframes, poses, target_views: int, min_new_fraction: float = 0.4) -> set[int] | None:
+    """Greedy, in flight order: keep a keyframe if >= ``min_new_fraction`` of its footprint is seen by < target views."""
+    import cv2
+
+    fit_pts = getattr(state, "fit_points", None)
+    if fit_pts is None or len(fit_pts) < 50:
+        return None
+    ground_z = float(np.median(np.asarray(fit_pts)[:, 2]))
+    unposed = set(getattr(state, "unrefined_keyframes", None) or [])
+    polys: dict[int, np.ndarray] = {}
+    for i, (kf, pose) in enumerate(zip(keyframes, poses, strict=True)):
+        intr = kf.intrinsics or state.intrinsics
+        if pose is None or intr is None or i in unposed:
+            continue
+        poly = _footprint_polygon(pose, intr, ground_z)
+        if poly is not None and np.all(np.isfinite(poly)):
+            polys[i] = poly
+    if len(polys) < 3:
+        return None
+    allp = np.concatenate(list(polys.values()))
+    lo = allp.min(0)
+    span = allp.max(0) - lo
+    # ~2 m cells, but never more than ~4k x 4k.
+    cell = max(2.0, float(span.max()) / 4000.0)
+    h, w = int(span[1] / cell) + 2, int(span[0] / cell) + 2
+    count = np.zeros((h, w), dtype=np.uint16)
+    keep: set[int] = set()
+    for i in sorted(polys):
+        mask = np.zeros((h, w), dtype=np.uint8)
+        pix = np.round((polys[i] - lo) / cell).astype(np.int32)
+        cv2.fillPoly(mask, [pix], 1)
+        inside = mask.astype(bool)
+        area = int(inside.sum())
+        if area == 0:
+            continue
+        new = float(np.mean(count[inside] < target_views))
+        if not keep or new >= min_new_fraction:
+            keep.add(i)
+            count[inside] += 1
+    return keep
+
+
+#: Height-field MVS needs this share of keyframes bundle-adjusted. Unlike
+#: the backbone windows it needs no pose for EVERY view: cameras the solve
+#: dropped (a banked turn, an unlogged descent) just contribute no evidence.
+_HEIGHTFIELD_MIN_POSED_FRACTION = 0.7
+
+
+def _heightfield_ready(state, keyframes, poses) -> bool:
+    """Bundle-adjusted, nadir, and posed for most keyframes: the height-field path can measure the surface."""
+    if not getattr(state, "pose_prior_refined", False) or getattr(state, "ba_points", None) is None:
+        return False
+    if not poses or len(poses) != len(keyframes):
+        return False
+    unrefined = set(getattr(state, "unrefined_keyframes", None) or [])
+    posed = [p for i, p in enumerate(poses) if p is not None and i not in unrefined]
+    if len(posed) < 3 or len(posed) < _HEIGHTFIELD_MIN_POSED_FRACTION * len(keyframes):
+        return False
+    return _is_nadir(posed)
+
+
+#: Measured 3D's working resolution follows ``geometry.max_image_size`` (the
+#: app's resolution setting), but never below this: stereo windows on
+#: smaller images are too coarse to match (flight01's config asks 392 px for
+#: the learned backbone, whose cost grows with the square of the tokens).
+_MVS3D_MIN_SIDE = 768
+
+
+def _mvs3d_ready(state, keyframes, poses) -> bool:
+    """Bundle-adjusted and posed for most keyframes, any viewing direction: measured full-3D can run."""
+    if not getattr(state, "pose_prior_refined", False) or getattr(state, "ba_points", None) is None:
+        return False
+    if not poses or len(poses) != len(keyframes):
+        return False
+    unrefined = set(getattr(state, "unrefined_keyframes", None) or [])
+    posed = [p for i, p in enumerate(poses) if p is not None and i not in unrefined]
+    return len(posed) >= 3 and len(posed) >= _HEIGHTFIELD_MIN_POSED_FRACTION * len(keyframes)
+
+
+def _is_nadir(poses, max_tilt_deg: float = 20.0) -> bool:
+    """Median camera optical axis within ``max_tilt_deg`` of straight down."""
+    axes = [np.asarray(p.R)[:, 2] for p in poses if p is not None]
+    if not axes:
+        return False
+    tilt = np.degrees(np.arccos(np.clip(-np.asarray(axes)[:, 2], -1.0, 1.0)))
+    return bool(np.median(tilt) <= max_tilt_deg)
+
+
+#: Points kept per non-owned view in case its owning window fails.
+_SPARE_POINTS_PER_VIEW = 50_000
+
+
+def _recover_orphaned_views(state, windows, window_errors, submaps, fuse) -> int:
+    """Re-emit keyframes whose owning window failed, from a neighbour's spare copy. Returns views recovered.
+
+    Ownership is fixed before windows run; a keyframe owned by a window that
+    is later excluded, fails to decode or raises would otherwise appear in
+    the model zero times even though an overlapping window reconstructed it.
+    """
+    owners = getattr(state, "view_owner", None) or {}
+    spares = getattr(state, "spare_views", None) or {}
+    failed = set(window_errors or {})
+    recovered = 0
+    for k, w_idx in sorted(owners.items()):
+        if w_idx not in failed or k not in spares:
+            continue
+        dense = getattr(state, "dense_views", None)
+        if dense is not None and k not in dense:
+            continue
+        window, xyz, conf, rgb, pose = spares[k]
+        sm = Submap(
+            window=window,
+            poses=[pose],
+            points=PointCloud(xyz=xyz, rgb=rgb),
+            confidence=conf,
+            keyframe_indices=[k],
+            local_origin=pose,
+            view_index=np.zeros(xyz.shape[0], dtype=np.int32),
+        )
+        submaps.append(sm)
+        fuse(sm)
+        recovered += 1
+    return recovered
+
+
+def _view_owners(windows) -> dict[int, int]:
+    """Keyframe -> the window that emits its points: the one where it is furthest from an edge.
+
+    Ties go to the earlier window. Every keyframe in any window gets exactly
+    one owner, so the fused model contains each view once.
+    """
+    owners: dict[int, tuple[int, int]] = {}
+    for w_idx, w in enumerate(windows):
+        kfs = list(w.keyframe_indices())
+        n = len(kfs)
+        for pos, k in enumerate(kfs):
+            depth = min(pos, n - 1 - pos)
+            best = owners.get(int(k))
+            if best is None or depth > best[1]:
+                owners[int(k)] = (w_idx, depth)
+    return {k: v[0] for k, v in owners.items()}
+
+
+def _thin_submap(submap, budget: int, seed: int = 0) -> None:
+    """Uniformly subsample a submap's points IN PLACE to at most ``budget`` (all per-point arrays together)."""
+    n = submap.points.xyz.reshape(-1, 3).shape[0]
+    if budget <= 0 or n <= budget:
+        return
+    keep = np.sort(np.random.default_rng(seed).choice(n, size=budget, replace=False))
+    pts = submap.points
+    submap.points = PointCloud(
+        xyz=pts.xyz.reshape(-1, 3)[keep],
+        rgb=None if pts.rgb is None else pts.rgb.reshape(n, -1)[keep],
+    )
+    submap.confidence = np.asarray(submap.confidence).reshape(-1)[keep]
+    if submap.view_index is not None and len(submap.view_index) == n:
+        submap.view_index = np.asarray(submap.view_index)[keep]
 
 
 def _run_windows(
@@ -1448,6 +2121,10 @@ def _run_windows(
                 device=device,
             )
         result = _anchor_window(state, result, images, intrinsics_list, poses_list, cfg, index, backbone=backbone, window=windows[index])
+        result = _fit_window_to_ba(state, result, windows[index], cfg, index)
+        if result is _EXCLUDED_WINDOW:
+            errors[index] = "excluded: no view could be fitted to the bundle adjustment"
+            return
         results[index] = _submap_from_result(state, windows[index], result, index)
 
     def flush_in_order(next_expected: int) -> int:
@@ -1611,6 +2288,12 @@ def _run_windows_sequential(
                         device=device,
                     )
                 result = _anchor_window(state, result, images, intrinsics_list, poses_list, cfg, i, backbone=backbone, window=windows[i])
+                result = _fit_window_to_ba(state, result, windows[i], cfg, i)
+                if result is _EXCLUDED_WINDOW:
+                    errors[i] = "excluded: no view could be fitted to the bundle adjustment"
+                    if not prefetch and i + 1 < total:
+                        pending = decoder.submit(_decode_window, state, windows[i + 1], keyframes, cfg, decode_lock)
+                    continue
                 submap, removed = _submap_from_result(state, windows[i], result, i)
             except PipelineCancelled:
                 raise
@@ -1668,6 +2351,17 @@ def _resize_for_backbone(
 # ---------------------------------------------------------------------------
 
 
+def _validate_telemetry_clock(state):
+    from drishti3d.geometry.pose_validation import ReconstructionRejected
+
+    stats = getattr(state, "telemetry_stats", {}) or {}
+    if stats.get("format") in {"csv", "gpx"} and stats.get("offset_source") == "assumed_zero":
+        raise ReconstructionRejected(
+            "Telemetry synchronization is unverified: supply an explicit --telemetry-offset "
+            "(including 0 if verified), a video-relative clock, or an unambiguous recording segment."
+        )
+
+
 class PosePriorStage(PipelineStage):
     """Refine the telemetry camera poses against the images BEFORE dense geometry.
 
@@ -1695,9 +2389,8 @@ class PosePriorStage(PipelineStage):
     (MapAnything -> SRT/GPS alignment -> refinement), done where it has the
     most leverage: before the model that depends on it.
 
-    Skips (never fails the run) when any keyframe lacks a conditioning pose
-    or when matching cannot triangulate enough tracks; GeometryStage then
-    proceeds with the flow-yaw telemetry poses exactly as before.
+    Missing inputs can skip refinement. A solved but physically invalid
+    candidate fails the run before dense reconstruction.
     """
 
     name = "pose_prior"
@@ -1792,6 +2485,10 @@ class PosePriorStage(PipelineStage):
         if not keyframes:
             raise StageUnavailable("pose_prior: no keyframes")
 
+        _validate_telemetry_clock(state)
+        # A supplied lens (calibration / user intrinsics with distortion)
+        # undistorts the frames before anything measures them.
+        _ensure_supplied_lens(state)
         yaw_diag = _refine_yaw_from_flow(state, keyframes, cfg_geometry=state.config.geometry)
         state.yaw_refinement = yaw_diag
 
@@ -1830,7 +2527,8 @@ class PosePriorStage(PipelineStage):
 
         refined = state.poses
         if len(refined) != len(keyframes):
-            raise StageUnavailable("pose_prior: bundle adjustment returned a pose count that does not match the keyframes")
+            from drishti3d.geometry.pose_validation import ReconstructionRejected
+            raise ReconstructionRejected("pose_prior: bundle adjustment returned a pose count that does not match the keyframes")
 
         shift = float(np.median([np.linalg.norm(r.t - p.t) for r, p in zip(refined, poses, strict=True)]))
         rot = float(np.median([np.degrees(np.arccos(np.clip((np.trace(r.R.T @ p.R) - 1) / 2, -1, 1))) for r, p in zip(refined, poses, strict=True)]))
@@ -1855,6 +2553,7 @@ class PosePriorStage(PipelineStage):
             "median_rotation_change_deg": artifacts["median_rotation_change_deg"],
             "yaw_from_flow_keyframes": (yaw_diag or {}).get("from_flow"),
             "yaw_flow_minus_telemetry_median_deg": (yaw_diag or {}).get("median_delta_deg"),
+            "lens_distortion": getattr(state, "lens_distortion", None),
         }
         return artifacts, f"pose prior refined: {message}; poses moved median {shift:.2f} m / {rot:.2f} deg"
 
@@ -2134,6 +2833,9 @@ def _merge_scale_per_submap(submaps, poses) -> dict[int, float]:
         for a, b in zip(range(len(kfs) - 1), range(1, len(kfs)), strict=False):
             if kfs[a] >= len(poses) or kfs[b] >= len(poses):
                 continue
+            # A camera the solve dropped has no pose on either side.
+            if any(p is None for p in (submap.poses[a], submap.poses[b], poses[kfs[a]], poses[kfs[b]])):
+                continue
             local.append(np.linalg.norm(np.asarray(submap.poses[b].t) - np.asarray(submap.poses[a].t)))
             merged.append(np.linalg.norm(np.asarray(poses[kfs[b]].t) - np.asarray(poses[kfs[a]].t)))
         local_arr, merged_arr = np.asarray(local), np.asarray(merged)
@@ -2150,7 +2852,7 @@ def _preview_dir(state) -> Path:
     return (parent / "preview") if parent != Path("") else (output_dir / "preview")
 
 
-def _run_placement_check(state, point_cloud, submap_labels, keyframes, submaps=None, poses=None):
+def _run_placement_check(state, point_cloud, submap_labels, keyframes, submaps=None, poses=None, ba_frame=None):
     """Render and measure where the windows landed. Never raises.
 
     Runs between the merge and fusion. A placement that is metres wrong
@@ -2170,14 +2872,57 @@ def _run_placement_check(state, point_cloud, submap_labels, keyframes, submaps=N
             if kf.pose is not None
         ]
         gps_ground_z = ground_z_from_telemetry(cams, altitudes) if len(cams) else None
+        # The bundle-adjusted sparse points are image-derived ground in the
+        # dense cloud's own frame whenever windows were rebuilt in the BA
+        # world frame -- a far better reference than the takeoff height on
+        # terrain that is not level with the launch point.
+        ba_points = getattr(state, "ba_points", None)
+        in_ba_frame = getattr(state, "geometry_world_frame", False) if ba_frame is None else ba_frame
+        reference = ba_points if in_ba_frame and ba_points is not None else None
+        pitches = [kf.telemetry.gimbal_pitch for kf in keyframes
+                   if kf.telemetry is not None and kf.telemetry.gimbal_pitch is not None]
+        forward = bool(pitches) and abs(float(np.median(pitches)) + 90.0) > 30.0
+        if forward:
+            reference = None  # solved points are canopy and walls, not ground samples
 
+        agl = [float(a) for a in altitudes if a is not None and float(a) > 1.0]
+        # A 2 m cell on a 0.5 m mesh has only ~16 ground vertices, below
+        # the placement statistic's 30-point minimum. Use eight voxels per
+        # side so flat ground contributes, rather than measuring only walls.
+        cell_m = 2.0
+        if getattr(state, "geometry_premeshed", False):
+            cell_m = max(cell_m, 8.0 * state.incremental_fusion.cell_m)
         report = write_placement_check(
             _placement_dir(state),
             point_cloud.xyz,
             submap_labels,
             gps_ground_z=gps_ground_z,
+            gps_agl_m=float(np.median(agl)) if agl else None,
+            reference_ground=reference,
+            reference_source="bundle-adjusted",
             camera_positions=cams if len(cams) else None,
+            cell_m=cell_m,
         )
+        if forward:
+            report.metrics["forward_view"] = True
+            if in_ba_frame and ba_points is not None and len(ba_points) >= 20:
+                from scipy.spatial import cKDTree
+
+                dense = np.asarray(point_cloud.xyz, dtype=np.float64)
+                dense = dense[np.isfinite(dense).all(axis=1)]
+                if len(dense) > 400_000:
+                    dense = dense[:: int(np.ceil(len(dense) / 400_000))]
+                bp = np.asarray(ba_points, dtype=np.float64).reshape(-1, 3)
+                bp = bp[np.isfinite(bp).all(axis=1)]
+                if len(dense) and len(bp):
+                    d, _ = cKDTree(dense).query(bp)
+                    depth = np.min(np.linalg.norm(bp[:, None, :] - cams[None, :, :], axis=2), axis=1) if len(cams) else None
+                    limit = max(1.0, 0.1 * float(np.median(depth))) if depth is not None else 1.0
+                    report.metrics["ba_to_dense_median_m"] = round(float(np.median(d)), 3)
+                    report.metrics["ba_to_dense_p90_m"] = round(float(np.percentile(d, 90)), 3)
+                    report.metrics["ba_to_dense_limit_m"] = round(limit, 3)
+                    report.metrics["passed"] = report.verdict == "PASS"
+                    report.metrics["verdict"] = report.verdict
 
         # Attribute the error. A window's ground depth is off by the
         # product of two independent corrections -- the anchor's (from
@@ -2211,7 +2956,7 @@ def _run_placement_check(state, point_cloud, submap_labels, keyframes, submaps=N
                     float(np.median(values)),
                 )
 
-        if not report.passed:
+        if report.verdict == "FAIL":
             logger.warning(
                 "PLACEMENT CHECK FAILED -- the windows do not agree on where the ground is. "
                 "Fusion will now mesh several copies of the same surface, and the result will "
@@ -2228,16 +2973,229 @@ def _run_placement_check(state, point_cloud, submap_labels, keyframes, submaps=N
 class GeometryStage(PipelineStage):
     """Plan windows, run the backbone per window, build Submaps, merge them.
 
-    Always produces *some* output: if the configured backbone
-    (``GeometryConfig.backbone``, or the runner's ``backbone`` override) is
-    unavailable, this falls back to ``"null"`` (``NullBackbone``, see its
-    module docstring) rather than failing the stage.
+    An unavailable configured backbone fails the stage. The synthetic
+    ``"null"`` backbone must be explicitly selected for demo/test runs.
     """
 
     name = "geometry"
 
+    def _run_mvs3d(
+        self, state, keyframes, poses, cancel_token, progress_cb, *, flight_profile, camera_gps_enu, partial_cb=None
+    ):
+        """Any viewing direction with a solved camera per keyframe: measured full-3D mesh (geometry.mvs3d)."""
+        from drishti3d.geometry.mapanything import scale_intrinsics
+        from drishti3d.geometry.mvs3d import Mvs3dConfig, reconstruct_mvs3d
+        from drishti3d.geometry.windows import Window
+
+        cache = getattr(state, "keyframe_cache", None)
+        unrefined = set(getattr(state, "unrefined_keyframes", None) or [])
+        missing = [i for i in range(len(keyframes)) if cache is None or cache.get(i) is None]
+        decoded = {}
+        if missing and state.video is not None:
+            frames = state.video.read_frames([keyframes[i].frame_index for i in missing])
+            decoded = {i: f.image for i, f in zip(missing, frames, strict=False) if f.image is not None}
+        images, intrinsics, used = [], [], []
+        for i, kf in enumerate(keyframes):
+            _check_cancel(cancel_token)
+            intr = kf.intrinsics or state.intrinsics
+            img = cache.get(i) if cache is not None else None
+            scale = cache.scale_for(i) if img is not None else 1.0
+            if img is None:
+                img = decoded.get(i)
+            if img is None or intr is None or poses[i] is None or i in unrefined:
+                continue
+            images.append(img)
+            intrinsics.append(scale_intrinsics(intr, scale) if scale != 1.0 else intr)
+            used.append(i)
+        # Vehicles, people and sky from the semantics stage, when it ran.
+        excluded = getattr(state, "semantic_excluded_masks", None) or {}
+        exclude = [excluded.get(i) for i in used]
+        surface, diag = reconstruct_mvs3d(
+            images, intrinsics, [poses[i] for i in used], points=getattr(state, "ba_points", None),
+            exclude_masks=exclude if any(m is not None for m in exclude) else None,
+            config=Mvs3dConfig(max_side=max(_MVS3D_MIN_SIDE, int(state.config.geometry.max_image_size))),
+            progress=(lambda c, t, m: (_check_cancel(cancel_token), progress_cb(c, t, m) if progress_cb else None)),
+            # Live view: each view's measured depth appears as it is swept.
+            partial=partial_cb,
+        )
+        point_cloud, _faces = surface.mesh()
+        window = Window(index=0, start=0, end=len(keyframes))
+        state.windows = [window]
+        state.view_owner = {i: 0 for i in range(len(keyframes))}
+        view_poses = list(poses)
+        state.submaps = [
+            Submap(
+                window=window, poses=view_poses, points=point_cloud,
+                confidence=point_cloud.confidence.astype(np.float32),
+                keyframe_indices=list(range(len(keyframes))),
+                local_origin=next(p for p in view_poses if p is not None),
+            )
+        ]
+        state.point_cloud = point_cloud
+        state.poses = view_poses
+        state.incremental_fusion = surface
+        state.geometry_heightmap = False
+        state.geometry_premeshed = True
+        state.mvs3d_diagnostics = diag
+        state.placement_report = _run_placement_check(
+            state, point_cloud, np.zeros(point_cloud.xyz.shape[0], dtype=np.int64), keyframes,
+            submaps=state.submaps, poses=view_poses, ba_frame=True,
+        )
+        state.geometry_flight_profile = flight_profile
+        state.geometry_merge_strategy = "world_frame"
+        state.geometry_merge_strategy_reason = (
+            "every keyframe has a bundle-adjusted pose: the surface was measured by plane-sweep stereo per "
+            "camera and fused volumetrically, with nothing to merge"
+        )
+        state.geometry_merge_strategy_warnings = []
+        state.geometry_junction_residuals = []
+        state.geometry_camera_gps_enu = camera_gps_enu
+        state.depth_anchor_summary = {}
+        state.geometry_dynamic_points_removed = 0
+        placement = state.placement_report
+        artifacts = {
+            "backbone": "mvs3d",
+            "windows": 1,
+            "submaps": 1,
+            "points": int(point_cloud.xyz.shape[0]),
+            "views_used": len(used),
+            "mvs3d": diag,
+            "placement_verdict": getattr(placement, "verdict", None),
+        }
+        refs = diag.get("references", len(used))
+        message = (
+            f"measured 3D (stereo + TSDF): {len(used)} views"
+            + (f" ({refs} with depth maps)" if refs != len(used) else "")
+            + f" -> {diag['vertices']} vertices / {diag['faces']} faces at {diag['voxel_m']:.3f} m, "
+            f"{100 * diag['measured_vertex_fraction']:.0f}% MEASURED, "
+            f"{100 * diag['consistent_fraction']:.0f}% of depths confirmed across views, "
+            f"{sum(diag['seconds'].values()):.0f} s"
+        )
+        if placement is not None:
+            message += f"; placement {placement.verdict}"
+        return artifacts, message
+
+    def _run_heightfield(
+        self, state, keyframes, poses, cancel_token, progress_cb, *, flight_profile, camera_gps_enu, partial_cb=None
+    ):
+        """Nadir flights with a bundle-adjusted camera per keyframe: measure the DSM (geometry.heightfield).
+
+        Replaces the backbone windows entirely -- no depth regression, no
+        per-window fitting, nothing to merge -- and hands FusionStage a
+        surface with the median height map's read-out interface, so
+        placement, confidence tiers and export are unchanged.
+        """
+        from drishti3d.geometry.heightfield import HeightfieldConfig, reconstruct_heightfield
+        from drishti3d.geometry.mapanything import scale_intrinsics
+        from drishti3d.geometry.windows import Window
+
+        cfg = state.config.geometry
+        cache = getattr(state, "keyframe_cache", None)
+        # Cameras the pose prior could not refine keep only their telemetry
+        # pose: metres off, so their pixels would vote for the wrong height.
+        unrefined = set(getattr(state, "unrefined_keyframes", None) or [])
+        images, intrinsics, used = [], [], []
+        missing = [i for i in range(len(keyframes)) if cache is None or cache.get(i) is None]
+        decoded = {}
+        if missing and state.video is not None:
+            frames = state.video.read_frames([keyframes[i].frame_index for i in missing])
+            decoded = {i: f.image for i, f in zip(missing, frames, strict=False) if f.image is not None}
+        for i, kf in enumerate(keyframes):
+            _check_cancel(cancel_token)
+            intr = kf.intrinsics or state.intrinsics
+            img = cache.get(i) if cache is not None else None
+            scale = cache.scale_for(i) if img is not None else 1.0
+            if img is None:
+                img = decoded.get(i)
+            if img is None or intr is None or poses[i] is None or i in unrefined:
+                continue
+            images.append(img)
+            intrinsics.append(scale_intrinsics(intr, scale) if scale != 1.0 else intr)
+            used.append(i)
+
+        agl = [
+            kf.telemetry.geo.alt_rel
+            for kf in keyframes
+            if kf.telemetry is not None and kf.telemetry.geo is not None and kf.telemetry.geo.alt_rel
+        ]
+        hf_cfg = HeightfieldConfig(fine_cell_m=float(getattr(cfg, "heightfield_cell_m", 0.5)))
+        surface, diag = reconstruct_heightfield(
+            images,
+            intrinsics,
+            [poses[i] for i in used],
+            prior_points=getattr(state, "ba_points", None),
+            agl_m=float(np.median(agl)) if agl else None,
+            config=hf_cfg,
+            progress=(lambda c, t, m: (_check_cancel(cancel_token), progress_cb(c, t, m) if progress_cb else None)),
+            # Live view: the surface appears tile by tile, coloured by its
+            # measured confidence / height uncertainty, while the sweep runs.
+            partial=partial_cb,
+        )
+
+        point_cloud = surface.point_cloud()
+        view_poses = list(poses)
+        window = Window(index=0, start=0, end=len(keyframes))
+        state.windows = [window]
+        state.view_owner = {i: 0 for i in range(len(keyframes))}
+        state.submaps = [
+            Submap(
+                window=window,
+                poses=view_poses,
+                points=point_cloud,
+                confidence=surface.score[surface.valid].astype(np.float32),
+                keyframe_indices=list(range(len(keyframes))),
+                local_origin=next(p for p in view_poses if p is not None),
+            )
+        ]
+        state.point_cloud = point_cloud
+        state.poses = view_poses
+        state.incremental_fusion = surface
+        state.geometry_heightmap = True
+        state.heightfield_diagnostics = diag
+        state.placement_report = _run_placement_check(
+            state,
+            point_cloud,
+            np.zeros(point_cloud.xyz.shape[0], dtype=np.int64),
+            keyframes,
+            submaps=state.submaps,
+            poses=view_poses,
+            ba_frame=True,  # the surface was measured from the bundle-adjusted cameras
+        )
+        state.geometry_flight_profile = flight_profile
+        state.geometry_merge_strategy = "world_frame"
+        state.geometry_merge_strategy_reason = (
+            "every keyframe has a bundle-adjusted pose and the flight is nadir: the surface was measured "
+            "directly by height-field multi-view stereo, with nothing to merge"
+        )
+        state.geometry_merge_strategy_warnings = []
+        state.geometry_junction_residuals = []
+        state.geometry_camera_gps_enu = camera_gps_enu
+        state.depth_anchor_summary = {}
+        state.geometry_dynamic_points_removed = 0
+
+        placement = state.placement_report
+        artifacts = {
+            "backbone": "heightfield_mvs",
+            "windows": 1,
+            "submaps": 1,
+            "points": int(point_cloud.xyz.shape[0]),
+            "views_used": len(used),
+            "heightfield": diag,
+            "placement_verdict": getattr(placement, "verdict", None),
+        }
+        message = (
+            f"height-field MVS: {len(used)} views -> {point_cloud.xyz.shape[0]} surface cells at "
+            f"{surface.cell_m:.2f} m ({diag['cells_fraction']:.0%} of the survey grid), median NCC "
+            f"{diag['score_median']}, {sum(diag['seconds'].values()):.0f} s"
+        )
+        if placement is not None:
+            message += f"; placement {placement.verdict}"
+        return artifacts, message
+
     def run(self, state, cancel_token, progress_cb, partial_cb=None):
         _check_cancel(cancel_token)
+        _validate_telemetry_clock(state)
+        _ensure_supplied_lens(state)
 
         keyframes = state.keyframes
         if not keyframes:
@@ -2392,6 +3350,7 @@ class GeometryStage(PipelineStage):
             max_extent_m=getattr(cfg, "max_window_extent_m", None),
         )
         state.windows = windows
+        state.view_owner = _view_owners(windows)
         logger.info(
             "geometry: %d window(s) planned for %d keyframes (window_size=%d, overlap=%d) -> %d junction(s)",
             len(windows),
@@ -2448,6 +3407,91 @@ class GeometryStage(PipelineStage):
             )
             merge_strategy = "telemetry_rotation"
 
+        # World-frame windows: with a bundle-adjusted pose for every
+        # keyframe, each window is rebuilt in the world frame as it
+        # finishes, so there is nothing left for the merge to fit.
+        ba_poses = getattr(state, "poses", None) or []
+        state.geometry_world_frame = bool(
+            getattr(cfg, "ba_world_frame", True)
+            and getattr(cfg, "ba_depth_fit", True)
+            and getattr(state, "ba_points", None) is not None
+            and len(ba_poses) == len(keyframes)
+            and all(p is not None for p in ba_poses)
+        )
+        dense_method = str(getattr(cfg, "dense_method", "auto")).lower()
+        if dense_method not in ("full3d", "mapanything", "auto", "heightfield", "mvs3d"):
+            raise ValueError(f"Unknown dense_method: {dense_method!r}")
+        full_3d = dense_method in ("full3d", "mapanything", "auto", "mvs3d")
+        if dense_method in ("auto", "mvs3d") and state.backbone_name != "null":
+            if _mvs3d_ready(state, keyframes, ba_poses):
+                return self._run_mvs3d(
+                    state, keyframes, ba_poses, cancel_token, progress_cb,
+                    flight_profile=flight_profile, camera_gps_enu=camera_gps_enu, partial_cb=partial_cb,
+                )
+            if dense_method == "mvs3d":
+                raise RuntimeError(
+                    "Measured 3D needs at least three validated cameras and refined sparse points; "
+                    "check camera matching and calibration."
+                )
+            # Automatic: without solved cameras nothing can be measured by
+            # stereo; the learned depth backbone (volumetric, labelled as such)
+            # still gives a model instead of no result.
+            logger.warning(
+                "geometry: the cameras could not be solved well enough for measured stereo; "
+                "using the %s depth backbone with volumetric fusion instead", state.backbone_name,
+            )
+        if dense_method == "heightfield":
+            if _heightfield_ready(state, keyframes, ba_poses):
+                return self._run_heightfield(
+                    state,
+                    keyframes,
+                    ba_poses,
+                    cancel_token,
+                    progress_cb,
+                    flight_profile=flight_profile,
+                    camera_gps_enu=camera_gps_enu,
+                    partial_cb=partial_cb,
+                )
+            raise RuntimeError("Terrain 2.5D needs refined cameras and downward-looking footage.")
+        if state.geometry_world_frame:
+            merge_strategy = "world_frame"
+            merge_strategy_reason = (
+                "every keyframe has a bundle-adjusted pose; windows are rebuilt in the world frame "
+                "from those poses and BA-fitted depth, so the merge is the identity"
+            )
+            logger.info("geometry: world-frame windows -- merge strategy 'world_frame'")
+            if full_3d:
+                # Keep every validated viewing direction, but do not emit
+                # geometry from cameras the pose solve rejected.
+                unrefined = set(getattr(state, "unrefined_keyframes", None) or [])
+                state.dense_views = set(range(len(keyframes))) - unrefined
+                if not state.dense_views:
+                    raise RuntimeError("Full 3D has no refined cameras for dense reconstruction")
+            # Coverage-based view selection for the DENSE model. Bundle
+            # adjustment keeps every keyframe (cross-leg matches fix poses),
+            # but depth from a 5th..14th view of the same ground only adds
+            # disagreeing regressed surfaces. Keep the views that add ground
+            # still seen by fewer than `dense_target_views`; windows with no
+            # selected view are not run at all.
+            target = int(getattr(cfg, "dense_target_views", 3) or 0)
+            # A shared ground footprint does not make oblique wall/underside
+            # views redundant. Keep all selected views in full-3D mode.
+            if target > 0 and not full_3d:
+                dense = _select_dense_views(
+                    state, keyframes, ba_poses, target, min_new_fraction=float(getattr(cfg, "dense_min_new_fraction", 0.4))
+                )
+                if dense is not None and 0 < len(dense) < len(keyframes):
+                    before = len(windows)
+                    windows = [w for w in windows if any(int(k) in dense for k in w.keyframe_indices())]
+                    state.windows = windows
+                    state.view_owner = _view_owners(windows)
+                    state.dense_views = dense
+                    logger.info(
+                        "geometry: dense view selection kept %d/%d keyframes (target %d views per ground point); "
+                        "%d/%d windows run",
+                        len(dense), len(keyframes), target, len(windows), before,
+                    )
+
         backbone_name = state.backbone_name
         try:
             # Fix 2: forward cfg.max_image_size through to the backbone's
@@ -2465,11 +3509,12 @@ class GeometryStage(PipelineStage):
             )
             if not backbone.is_available():
                 raise RuntimeError(f"backbone {backbone_name!r} reports unavailable")
-        except Exception as exc:  # noqa: BLE001 - any backbone-selection problem falls back to null
-            if backbone_name != "null":
-                logger.warning("geometry: backbone %r unavailable (%s); falling back to 'null'", backbone_name, exc)
-            backbone_name = "null"
-            backbone = get_backbone("null")
+        except Exception as exc:
+            raise RuntimeError(
+                f"Reconstruction backbone {backbone_name!r} is unavailable: {exc}. "
+                "Install its package and model weights. Synthetic demo geometry is "
+                "only available by explicitly selecting backbone='null'."
+            ) from exc
 
         # One backbone per available GPU. `available_devices` returns a
         # single entry for MPS/CPU and for a one-GPU box, so this collapses
@@ -2525,10 +3570,72 @@ class GeometryStage(PipelineStage):
         # the thing being overlapped is GPU inference.
         decode_lock = threading.Lock()
 
+        incremental = None
+        state.geometry_heightmap = False
+        if state.geometry_world_frame:
+            if not full_3d and getattr(state.config.fusion, "heightmap_for_nadir", False) and _is_nadir(ba_poses):
+                # Straight-down survey: one surface per ground column, median
+                # vote across views (fusion.heightmap). The cell size is set
+                # from the first window's actual point spacing.
+                state.geometry_heightmap = True
+                incremental = None  # created lazily on the first window
+            else:
+                from drishti3d.fusion.incremental import IncrementalVoxelFusion
+
+                incremental = IncrementalVoxelFusion(
+                    float(getattr(state.config.fusion, "incremental_voxel_m", 0.3)),
+                    tier_voxel_m=float(getattr(state.config.fusion, "incremental_tier_voxel_m", 1.0)),
+                )
+        state.incremental_fusion = incremental
+        preview_state = {"last": 0.0}
+        stored_budget = max(
+            100_000, int(getattr(cfg, "world_frame_total_points", 12_000_000)) // max(1, len(windows))
+        )
+
         def on_window_done(index: int, submap: Submap, removed: int) -> None:
             """Collector, always called on the main thread."""
             nonlocal dynamic_points_removed
             dynamic_points_removed += removed
+            nonlocal incremental
+            if incremental is None and state.geometry_heightmap:
+                from drishti3d.fusion.heightmap import HeightmapFusion, cell_size_for
+
+                cell = cell_size_for(submap.points.xyz, floor_m=float(getattr(state.config.fusion, "incremental_voxel_m", 0.3)))
+                incremental = HeightmapFusion(cell_m=cell, agree_m=float(getattr(state.config.fusion, "incremental_tier_voxel_m", 1.0)))
+                state.incremental_fusion = incremental
+                logger.info("geometry: nadir flight -- median height-map fusion at %.2f m cells", cell)
+            if incremental is not None:
+                # World-frame window: fuse it into the running model now and
+                # show the fused model, not a re-merge of every window so far.
+                try:
+                    incremental.add_submap(submap)
+                    # The live model keeps full density; the stored copy only
+                    # feeds the final merge, placement check and TSDF (voxel-
+                    # capped at ~1.5M points anyway), so it is thinned to a
+                    # flight-wide budget. 75 windows x 1.2M points held in RAM
+                    # was what made late windows ~45 s and the merge 10 min.
+                    _thin_submap(submap, stored_budget, seed=1000 + index)
+                    run_t0 = getattr(state, "run_t0", None)
+                    if run_t0 is not None and getattr(state, "first_patch_s", None) is None:
+                        state.first_patch_s = time.monotonic() - run_t0
+                        logger.info("geometry: first fused patch at %.1f s", state.first_patch_s)
+                    # Throttled and decimated: re-sending the whole model
+                    # (8M+ points on flight01) after every window drove
+                    # memory up and later windows to ~55 s each.
+                    now = time.monotonic()
+                    if partial_cb is not None and now - preview_state["last"] >= 5.0:
+                        preview_state["last"] = now
+                        cloud = incremental.cloud()
+                        n_pts = cloud.xyz.shape[0]
+                        if n_pts > 1_500_000:
+                            step = int(np.ceil(n_pts / 1_500_000))
+                            cloud = PointCloud(
+                                xyz=cloud.xyz[::step], rgb=cloud.rgb[::step], confidence=cloud.confidence[::step]
+                            )
+                        partial_cb(cloud)
+                except Exception:
+                    logger.warning("geometry: incremental fusion of window %d failed", index, exc_info=True)
+                return
             if partial_cb is not None:
                 try:
                     partial_pc, _ = merge_submaps(
@@ -2553,6 +3660,7 @@ class GeometryStage(PipelineStage):
                 )
             raise PipelineCancelled()
 
+        state.spare_views = {} if state.geometry_world_frame else None
         try:
             window_errors = (
                 _run_windows(
@@ -2582,6 +3690,16 @@ class GeometryStage(PipelineStage):
                     f"geometry reconstructed 0/{len(windows)} windows -- every window failed. "
                     f"First failure:\n{first}"
                 )
+            if window_errors and state.geometry_world_frame:
+
+                def _fuse_orphan(sm):
+                    if state.incremental_fusion is not None:
+                        state.incremental_fusion.add_submap(sm)
+
+                n_rec = _recover_orphaned_views(state, windows, window_errors, submaps, _fuse_orphan)
+                if n_rec:
+                    logger.info("geometry: recovered %d keyframe view(s) owned by failed windows from neighbours", n_rec)
+            state.spare_views = None
             if window_errors:
                 logger.warning(
                     "geometry: %d/%d windows failed but %d succeeded; the reconstruction is incomplete",
@@ -2608,7 +3726,7 @@ class GeometryStage(PipelineStage):
         # submap onto the CAMERAS -- cannot fix that, so it has to be
         # resolved first. See geometry.scale_consensus.
         state.scale_consensus = {}
-        if submaps and getattr(cfg, "scale_consensus", True):
+        if submaps and getattr(cfg, "scale_consensus", True) and not getattr(state, "geometry_world_frame", False):
             try:
                 from drishti3d.geometry.scale_consensus import harmonise_submap_scales
 
@@ -2629,6 +3747,14 @@ class GeometryStage(PipelineStage):
                     keyframe_altitude_m=keyframe_altitude_m,
                     return_labels=True,
                 )
+                if getattr(state, "geometry_world_frame", False) and len(ba_poses) == len(keyframes):
+                    # World-frame merge is the identity, so the bundle-adjusted
+                    # pose list IS the merged one -- and it covers every
+                    # keyframe, including those of excluded/failed windows.
+                    # The merge's own list drops those, and a pose list
+                    # shorter than the keyframes silently disabled
+                    # georeferencing for the whole model.
+                    poses = list(ba_poses)
             else:
                 point_cloud, poses = PointCloud(xyz=np.zeros((0, 3), dtype=np.float64)), []
         except Exception:
@@ -3003,18 +4129,66 @@ class MatchingStage(PipelineStage):
                 progress_cb(i, total_steps, f"detecting features {i + 1}/{n}")
             grays.append(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
 
-        features_per_frame = [
-            features_mod.detect_and_describe(
-                gray,
-                method=_match_cfg(state, "method", _MATCH_METHOD),
-                max_features=int(_match_cfg(state, "max_features", _MATCH_MAX_FEATURES)),
-                detect_scale=float(_match_cfg(state, "detect_scale", 1.0)),
-            )
-            for gray in grays
-        ]
+        method = _match_cfg(state, "method", _MATCH_METHOD)
+        learned = None
+        if method == "disk":
+            # DISK + LightGlue (geometry.learned_matching). Falls back to SIFT
+            # rather than failing the stage when kornia is not installed.
+            # That module imports kornia lazily, so importing it proves
+            # nothing -- an ImportError guard here never fired.
+            from drishti3d.geometry import learned_matching
 
+            if learned_matching.is_available():
+                learned = learned_matching
+            else:
+                logger.warning("matching: kornia not installed; falling back from DISK+LightGlue to SIFT")
+                method = "sift"
+        if learned is not None:
+            features_per_frame = []
+            for i, img in enumerate(images):
+                _check_cancel(cancel_token)
+                if progress_cb:
+                    progress_cb(i, total_steps, f"DISK features {i + 1}/{n}")
+                features_per_frame.append(
+                    learned.detect_disk(
+                        img,
+                        max_features=int(_match_cfg(state, "learned_max_features", 1024)),
+                        detect_scale=float(_match_cfg(state, "learned_detect_scale", 0.5)),
+                    )
+                )
+            matcher = learned.LightGlueMatcher()
+        else:
+            features_per_frame = [
+                features_mod.detect_and_describe(
+                    gray,
+                    method=method,
+                    max_features=int(_match_cfg(state, "max_features", _MATCH_MAX_FEATURES)),
+                    detect_scale=float(_match_cfg(state, "detect_scale", 1.0)),
+                )
+                for gray in grays
+            ]
+            matcher = None
+        gravity_deg = _match_cfg(state, "gravity_check_deg", 3.0)
+        gravity_rejected = 0
+
+        # Loop radius from the measured image footprint (off by default, see
+        # _MATCH_FOOTPRINT_FRACTION): on a mapping grid the neighbouring strip
+        # is well inside one footprint (flight01: 25 m apart, 82 m along-track)
+        # but outside the fixed 15 m, so strips are tied only through GPS.
+        radius = _MATCH_GPS_RADIUS_M
+        along = ((getattr(state, "triage_report", None) or {}).get("footprint") or {}).get(
+            "along_track_footprint_m_median"
+        )
+        tie_fraction = float(_match_cfg(state, "strip_tie_footprint_fraction", _MATCH_FOOTPRINT_FRACTION) or 0.0)
+        if along and tie_fraction > 0:
+            radius = max(radius, tie_fraction * float(along))
         pairs = tracks_mod.select_pairs(
-            keyframes, strategy="sequential+loop", window=_MATCH_WINDOW, gps_radius_m=_MATCH_GPS_RADIUS_M
+            keyframes, strategy="sequential+loop", window=_MATCH_WINDOW, gps_radius_m=radius,
+            max_loop_pairs_per_frame=_MATCH_LOOP_PAIRS_PER_FRAME,
+        )
+        logger.info(
+            "matching: %d pairs (window %d, loop radius %.0f m, <= %d loop pairs per keyframe)",
+            len(pairs), _MATCH_WINDOW, radius, _MATCH_LOOP_PAIRS_PER_FRAME,
         )
 
         verified_pairs: list[tuple[int, int, features_mod.Matches]] = []
@@ -3022,14 +4196,54 @@ class MatchingStage(PipelineStage):
             _check_cancel(cancel_token)
             if progress_cb:
                 progress_cb(n, total_steps, f"matching pair {k + 1}/{len(pairs)}")
-            raw = features_mod.match_features(features_per_frame[i], features_per_frame[j], ratio=_MATCH_RATIO)
+            if matcher is not None:
+                raw = matcher.match(features_per_frame[i], features_per_frame[j])
+            else:
+                raw = features_mod.match_features(features_per_frame[i], features_per_frame[j], ratio=_MATCH_RATIO)
             if len(raw) < _MIN_VERIFIED_INLIERS:
                 continue
             verified = features_mod.geometric_verify(
                 features_per_frame[i], features_per_frame[j], raw, intrinsics=intrinsics_list[i], method="essential"
             )
-            if verified.inlier_mask is not None and int(verified.inlier_mask.sum()) >= _MIN_VERIFIED_INLIERS:
-                verified_pairs.append((i, j, verified))
+            if verified.inlier_mask is None or int(verified.inlier_mask.sum()) < _MIN_VERIFIED_INLIERS:
+                continue
+            verified_pairs.append((i, j, verified))
+
+        # Gravity check (UAVD4L-style): a pair's recovered relative rotation
+        # must carry one camera's IMU "down" onto the other's. Adaptive: a
+        # real gimbal log is not good to 3 deg (flight01: a fixed 3 deg cut
+        # rejected 784/937 good pairs), so only OUTLIERS against this
+        # flight's own error distribution are dropped -- above
+        # max(gravity_check_deg, 3 x median error). Only measured tilts vote:
+        # an assumed-nadir pose would veto every slightly tilted frame.
+        if gravity_deg is not None and poses is not None:
+            from drishti3d.geometry.learned_matching import gravity_consistent
+
+            errs: dict[int, float] = {}
+            for k, (i, j, ver) in enumerate(verified_pairs):
+                if (
+                    ver.relative_pose is None
+                    or poses[i] is None
+                    or poses[j] is None
+                    or not all(
+                        getattr(getattr(keyframes[q], "telemetry", None), "gimbal_pitch", None) is not None for q in (i, j)
+                    )
+                ):
+                    continue
+                _ok, errs[k] = gravity_consistent(ver.relative_pose[0], poses[i].R, poses[j].R, max_deg=180.0)
+            if len(errs) >= 10:
+                cut = max(float(gravity_deg), 3.0 * float(np.median(list(errs.values()))))
+                keep = [p for k, p in enumerate(verified_pairs) if errs.get(k, 0.0) <= cut]
+                gravity_rejected = len(verified_pairs) - len(keep)
+                state.gravity_disagreement_deg = float(np.median(list(errs.values())))
+                logger.info(
+                    "matching: gravity check -- median tilt disagreement %.2f deg, cut %.2f deg",
+                    float(np.median(list(errs.values()))),
+                    cut,
+                )
+                verified_pairs = keep
+        if gravity_rejected:
+            logger.info("matching: gravity check rejected %d/%d verified pairs", gravity_rejected, len(pairs))
 
         if not verified_pairs:
             raise StageUnavailable("matching: no keyframe pair passed geometric verification; skipping")
@@ -3061,6 +4275,48 @@ class MatchingStage(PipelineStage):
             trackset, stats, n, len(pairs), len(verified_pairs),
         )
 
+    def _image_only_fallback(self, state, poses, intrinsics_list, trackset, why: str):
+        """Solve the cameras from the images alone when the flight log cannot place them (geometry.sfm_init).
+
+        Tried once per run. Returns (poses, trackset) with keyframes the
+        images could not register left at their log pose and their
+        observations removed, or None when the images cannot do better.
+        """
+        if getattr(state, "_image_only_tried", False) or not bool(_match_cfg(state, "image_only_fallback", True)):
+            return None
+        state._image_only_tried = True
+        from drishti3d.geometry.sfm_init import image_only_poses
+
+        import os as _os
+
+        if _os.environ.get("DRISHTI_DUMP_SFM"):
+            # Debug hook: the image-only solve's exact inputs, for offline iteration.
+            import pickle as _pickle
+
+            with open(_os.environ["DRISHTI_DUMP_SFM"], "wb") as _fh:
+                _pickle.dump({"trackset": trackset, "intrinsics": intrinsics_list, "poses": poses}, _fh)
+
+        try:
+            res = image_only_poses(trackset, intrinsics_list, poses)
+        except Exception:  # noqa: BLE001 - a fallback must never take the stage down with it
+            logger.warning("matching: image-only camera solve failed", exc_info=True)
+            return None
+        if res is None or len(res.registered) < max(3, int(np.ceil(0.6 * len(poses)))):
+            logger.warning("matching: image-only camera solve registered too few keyframes; keeping the log's poses")
+            return None
+        unregistered = {i for i, p in enumerate(res.poses) if p is None}
+        new_poses = [p if p is not None else poses[i] for i, p in enumerate(res.poses)]
+        if unregistered:
+            trackset = _tracks_without_cameras(trackset, unregistered)
+            state.unrefined_keyframes = sorted(set(getattr(state, "unrefined_keyframes", None) or []) | unregistered)
+        state.image_only_cameras = {**res.diagnostics, "reason": why}
+        logger.warning(
+            "matching: the flight log cannot place the cameras (%s); solved them from the images alone "
+            "(%d/%d keyframes) and placed them on the GPS track by one similarity",
+            why, len(res.registered), len(poses),
+        )
+        return new_poses, trackset
+
     def _triangulate_and_build(
         self, state, cancel_token, progress_cb, keyframes, poses, intrinsics_list,
         trackset, stats, n, n_pairs, n_verified,
@@ -3072,7 +4328,6 @@ class MatchingStage(PipelineStage):
         whatever poses it now has.
         """
         from drishti3d.geometry import tracks as tracks_mod
-        from drishti3d.geometry import triangulate as triangulate_mod
 
         total_steps = n + 1
         _check_cancel(cancel_token)
@@ -3085,6 +4340,14 @@ class MatchingStage(PipelineStage):
         kept_points = points3d[valid_mask]
 
         if len(kept_tracks) < _MIN_TRACKS_FOR_BA:
+            fallback = self._image_only_fallback(
+                state, poses, intrinsics_list, trackset, f"only {len(kept_tracks)} tracks triangulate through the logged cameras"
+            )
+            if fallback is not None:
+                return self._triangulate_and_build(
+                    state, cancel_token, progress_cb, keyframes, fallback[0], intrinsics_list,
+                    fallback[1], stats, n, n_pairs, n_verified,
+                )
             raise StageUnavailable(
                 f"matching: only {len(kept_tracks)} tracks triangulated with a usable angle "
                 f"(>= {_MIN_TRIANGULATION_ANGLE_DEG} deg; need >= {_MIN_TRACKS_FOR_BA}); skipping bundle adjustment"
@@ -3123,6 +4386,16 @@ class MatchingStage(PipelineStage):
         pre_filter_errors = np.array([t.reprojection_error_px for t in kept_tracks.tracks], dtype=np.float64)
         kept_points, kept_tracks = filtered_points, filtered_tracks
         if len(kept_tracks) < _MIN_TRACKS_FOR_BA:
+            fallback = self._image_only_fallback(
+                state, poses, intrinsics_list, trackset,
+                f"{pre_filter_count - len(kept_tracks)}/{pre_filter_count} tracks reproject more than "
+                f"{_MAX_REPROJECTION_PX_PREBA:.0f}px through the logged cameras",
+            )
+            if fallback is not None:
+                return self._triangulate_and_build(
+                    state, cancel_token, progress_cb, keyframes, fallback[0], intrinsics_list,
+                    fallback[1], stats, n, n_pairs, n_verified,
+                )
             finite = np.isfinite(pre_filter_errors)
             if finite.any():
                 fe = pre_filter_errors[finite]
@@ -3196,7 +4469,190 @@ def _rescale_focal(intr: CameraIntrinsics, factor: float) -> CameraIntrinsics:
     )
 
 
-def _camera_priors_from_telemetry(keyframes: list[Keyframe]) -> list:
+def _dist_vector(dist_coeffs) -> np.ndarray:
+    out = np.zeros(5, dtype=np.float64)
+    d = np.asarray(dist_coeffs, dtype=np.float64).reshape(-1)[:5]
+    out[: d.size] = d
+    return out
+
+
+def _undistort_pixels(uv: np.ndarray, intr: CameraIntrinsics, dist: np.ndarray) -> np.ndarray:
+    """Raw-lens pixels -> the same rays' pixels in the undistorted image (same ``K``)."""
+    K = intr.K()
+    pts = np.asarray(uv, dtype=np.float64).reshape(-1, 1, 2)
+    criteria = (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 100, 1e-12)
+    return cv2.undistortPointsIter(pts, K, dist, None, K, criteria).reshape(-1, 2)
+
+
+def _undistort_tracks(tracks, intrinsics_list, dist: np.ndarray) -> int:
+    """Rewrite every observation's pixel in place from the raw lens to the undistorted image."""
+    refs: dict[int, list] = {}
+    for track in tracks:
+        for j, obs in enumerate(track.observations):
+            refs.setdefault(int(obs[0]), []).append((track, j))
+    for cam, items in refs.items():
+        uv = np.array([t.observations[j][2] for t, j in items], dtype=np.float64)
+        undistorted = _undistort_pixels(uv, intrinsics_list[cam], dist)
+        for (t, j), new_uv in zip(items, undistorted, strict=True):
+            frame_idx, kp_idx, _ = t.observations[j]
+            t.observations[j] = (frame_idx, kp_idx, new_uv)
+    return sum(len(items) for items in refs.values())
+
+
+def _undistorted_trackset(trackset, intrinsics_list, dist: np.ndarray):
+    """Undistorted COPY of a trackset -- the originals stay raw until the lens is committed."""
+    from dataclasses import replace
+
+    from drishti3d.geometry.tracks import TrackSet
+
+    copies = [replace(t, observations=list(t.observations)) for t in trackset.tracks]
+    _undistort_tracks(copies, intrinsics_list, dist)
+    return TrackSet(tracks=copies)
+
+
+def _tracks_without_cameras(trackset, cameras: set[int]):
+    """COPY of a trackset without the observations of ``cameras``; tracks left with < 2 views go too."""
+    from dataclasses import replace
+
+    from drishti3d.geometry.tracks import TrackSet
+
+    kept = []
+    for t in trackset.tracks:
+        observations = [o for o in t.observations if int(o[0]) not in cameras]
+        if len(observations) >= 2:
+            kept.append(replace(t, observations=observations))
+    return TrackSet(tracks=kept)
+
+
+def _problem_without_cameras(problem, cameras: set[int], poses=None, points=None, intrinsics=None):
+    """A BAProblem without the observations of ``cameras`` (points left with < 2 views go too).
+
+    ``poses`` / ``points`` / ``intrinsics`` optionally re-seed it from an
+    earlier solve; ``points`` must be index-aligned with ``problem.points``.
+    """
+    from drishti3d.geometry.bundle import BAProblem
+
+    ci = np.asarray(problem.obs_camera_idx, dtype=np.int64)
+    pi = np.asarray(problem.obs_point_idx, dtype=np.int64)
+    pts = np.asarray(problem.points if points is None else points, dtype=np.float64)
+    keep = ~np.isin(ci, sorted(cameras))
+    point_ok = np.bincount(pi[keep], minlength=len(pts)) >= 2
+    keep &= point_ok[pi]
+    remap = np.cumsum(point_ok) - 1
+    return BAProblem(
+        cameras=list(problem.cameras if poses is None else poses),
+        intrinsics=list(problem.intrinsics if intrinsics is None else intrinsics),
+        points=pts[point_ok],
+        obs_camera_idx=ci[keep],
+        obs_point_idx=remap[pi[keep]],
+        obs_uv=np.asarray(problem.obs_uv, dtype=np.float64)[keep],
+        camera_priors=list(getattr(problem, "camera_priors", []) or []),
+    )
+
+
+def _remap_semantics(state, K_native: np.ndarray, native_size: tuple[int, int], dist: np.ndarray) -> None:
+    """Carry semantic masks computed on raw frames into the undistorted frames."""
+    masks = getattr(state, "semantic_masks", None) or {}
+    excluded = getattr(state, "semantic_excluded_masks", None) or {}
+    maps_by_shape: dict[tuple[int, int], tuple] = {}
+
+    def maps_for(shape):
+        if shape not in maps_by_shape:
+            h, w = shape
+            K = K_native.copy()
+            K[0] *= w / native_size[0]
+            K[1] *= h / native_size[1]
+            maps_by_shape[shape] = cv2.initUndistortRectifyMap(K, dist, None, K, (w, h), cv2.CV_32FC1)
+        return maps_by_shape[shape]
+
+    for index, seg in masks.items():
+        mx, my = maps_for(seg.labels.shape[:2])
+        seg.labels = cv2.remap(seg.labels, mx, my, cv2.INTER_NEAREST, borderMode=cv2.BORDER_REPLICATE)
+        seg.confidence = cv2.remap(seg.confidence, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    for index, mask in list(excluded.items()):
+        mx, my = maps_for(mask.shape[:2])
+        excluded[index] = cv2.remap(mask.astype(np.uint8), mx, my, cv2.INTER_NEAREST,
+                                    borderMode=cv2.BORDER_REPLICATE).astype(bool)
+
+
+def _install_lens(state, dist_coeffs, *, source: str, track_intrinsics=None) -> dict | None:
+    """Commit a lens model: every frame decoded from now on is undistorted.
+
+    The undistorted image keeps the camera matrix ``K`` (same size, same
+    principal point; barrel distortion only crops the rim), so from here
+    on every ``CameraIntrinsics`` in the pipeline is the pinhole ``K`` with
+    ``dist_coeffs=None``, and pinhole code downstream (backbone
+    conditioning, plane sweep, depth fit, fusion, texture) is exact. The
+    raw lens is kept in ``state.lens_distortion`` for exports that must map
+    raw video pixels (``cameras.json``).
+
+    Stored feature tracks (pixels of the raw frames) are moved to their
+    undistorted positions using ``track_intrinsics`` -- the per-camera
+    intrinsics at the tracks' own resolution. Idempotent per state.
+    """
+    from dataclasses import replace
+
+    if getattr(state, "lens_distortion", None) is not None:
+        return state.lens_distortion
+    dist = _dist_vector(dist_coeffs)
+    if not state.keyframes and state.intrinsics is None:
+        return None
+    native = (state.keyframes[0].intrinsics if state.keyframes and state.keyframes[0].intrinsics is not None
+              else state.intrinsics)
+    if native is None:
+        return None
+    K = native.K()
+    if dist.any():
+        video = getattr(state, "video", None)
+        if video is not None and hasattr(video, "set_undistortion"):
+            video.set_undistortion(K, dist)
+        cache = getattr(state, "keyframe_cache", None)
+        if cache is not None and hasattr(cache, "undistort"):
+            cache.undistort(K, dist)
+        if track_intrinsics is not None:
+            unique: dict[int, object] = {}
+            cached = getattr(state, "_matching_cache", None) or {}
+            for trackset in (cached.get("trackset"), getattr(state, "matching_trackset", None)):
+                for t in trackset.tracks if trackset is not None else []:
+                    unique[id(t)] = t
+            _undistort_tracks(list(unique.values()), track_intrinsics, dist)
+        _remap_semantics(state, K, (int(native.width), int(native.height)), dist)
+    for kf in state.keyframes:
+        if kf.intrinsics is not None:
+            kf.intrinsics = replace(kf.intrinsics, dist_coeffs=None)
+    if state.intrinsics is not None:
+        state.intrinsics = replace(state.intrinsics, dist_coeffs=None)
+    corner = np.array([[[0.0, 0.0]], [[float(native.width), 0.0]], [[0.0, float(native.height)]],
+                       [[float(native.width), float(native.height)]]])
+    shift = float(np.max(np.linalg.norm(_undistort_pixels(corner, native, dist) - corner.reshape(-1, 2), axis=1)))
+    state.lens_distortion = {
+        "dist_coeffs": dist.tolist(),
+        "K": [float(native.fx), float(native.fy), float(native.cx), float(native.cy)],
+        "width": int(native.width),
+        "height": int(native.height),
+        "source": source,
+        "corner_shift_px": round(shift, 1),
+    }
+    logger.info(
+        "lens: %s distortion k1=%.4f k2=%.4f (corner pixels move %.0f px); every frame from here on is undistorted",
+        source, dist[0], dist[1], shift,
+    )
+    return state.lens_distortion
+
+
+def _ensure_supplied_lens(state) -> None:
+    """Undistort frames for a lens that arrived with the intrinsics (calibration/user input)."""
+    if getattr(state, "lens_distortion", None) is not None:
+        return
+    candidates = [getattr(state, "intrinsics", None),
+                  *(getattr(kf, "intrinsics", None) for kf in getattr(state, "keyframes", None) or [])]
+    source = next((k for k in candidates
+                   if k is not None and k.dist_coeffs is not None and np.any(k.dist_coeffs)), None)
+    if source is not None:
+        _install_lens(state, source.dist_coeffs, source=getattr(state, "intrinsics_provenance", "") or "supplied")
+
+
+def _camera_priors_from_telemetry(keyframes: list[Keyframe], state=None) -> list:
     """Build ``bundle.CameraPrior`` entries from each keyframe's own flight telemetry.
 
     Two independent priors, attached per keyframe only when their own
@@ -3224,6 +4680,14 @@ def _camera_priors_from_telemetry(keyframes: list[Keyframe]) -> list:
     """
     from drishti3d.geometry.bundle import CameraPrior
 
+    # How far this flight's logged tilt disagrees with image geometry, as
+    # measured by the matching stage's gravity check. A 2 deg prior on a
+    # log that is 7.7 deg off (flight01) pins every camera to the wrong
+    # tilt; the prior is widened to 1.5x the measured disagreement so the
+    # images can correct it while GPS still fixes position.
+    measured = getattr(state, "gravity_disagreement_deg", None)
+    tilt_sigma = None if measured is None or measured <= 2.0 / 1.5 else min(5.0, float(1.5 * measured))
+
     enu_by_idx = _gps_enu_by_keyframe(keyframes)
 
     priors = []
@@ -3244,6 +4708,7 @@ def _camera_priors_from_telemetry(keyframes: list[Keyframe]) -> list:
                 gps_sigma_m=accuracy_h,
                 gimbal_pitch_deg=gimbal_pitch,
                 gimbal_roll_deg=gimbal_roll,
+                tilt_sigma_deg=tilt_sigma,
             )
         )
 
@@ -3316,7 +4781,46 @@ class BundleAdjustmentStage(PipelineStage):
 
         _check_cancel(cancel_token)
 
-        problem.camera_priors = _camera_priors_from_telemetry(state.keyframes)
+        problem.camera_priors = _camera_priors_from_telemetry(state.keyframes, state)
+        if getattr(state, "image_only_cameras", None):
+            # The images placed these cameras because the log could not: its
+            # positions are a weak datum now (sigma >= 10 m), its attitude
+            # priors stay.
+            for cp in problem.camera_priors:
+                if getattr(cp, "gps_position", None) is not None:
+                    cp.gps_sigma_m = max(float(cp.gps_sigma_m or 0.0), 10.0)
+        from drishti3d.geometry.pose_validation import (
+            validate_cameras,
+            validate_sparse_depth,
+        )
+
+        reference_poses = list(problem.cameras)
+        reference_intrinsics = list(problem.intrinsics)
+        gps = _gps_enu_by_keyframe(state.keyframes)
+        # The logged attitude, independent of any flow-yaw replacement in
+        # the seed: a camera may move away from one attitude estimate but
+        # not from both (see validate_cameras).
+        try:
+            attitude = _poses_from_telemetry(state.keyframes, assume_nadir=False)
+        except Exception:
+            attitude = None
+        if attitude is not None and len(attitude) != len(reference_poses):
+            attitude = None
+
+        unrefined: set[int] = set()
+
+        def validate_result(candidate, candidate_problem):
+            # Judge the cameras the images posed; unposed ones sit at their
+            # telemetry pose and would only dilute the medians.
+            keep = [i for i in range(len(reference_poses)) if i not in unrefined]
+            diagnostics = validate_cameras(
+                [candidate.poses[i] for i in keep], [reference_poses[i] for i in keep],
+                [candidate.intrinsics[i] for i in keep], [reference_intrinsics[i] for i in keep],
+                gps={k: gps[i] for k, i in enumerate(keep) if i in gps},
+                attitude_reference=None if attitude is None else [attitude[i] for i in keep],
+            )
+            validate_sparse_depth(candidate, candidate_problem)
+            return diagnostics
 
         # Pass 1: loose-gated tracks, telemetry rotations. Its job is to
         # fix the rotations, not to produce the final answer.
@@ -3340,29 +4844,125 @@ class BundleAdjustmentStage(PipelineStage):
         # carrying only gimbal attitude when GPS is absent, and attitude
         # does not pin depth, so it does not break the focal/depth
         # ambiguity that BAConfig.refine_intrinsics warns about.
+        #
+        # The focal is ONE shared factor (one lens), never per camera: 12
+        # cameras x 4 free intrinsics each could absorb pose errors
+        # camera by camera.
+        #
+        # Radial distortion (k1, k2) is solved whenever the lens has none on
+        # record -- EXIF/SRT/flow give a focal length, never distortion --
+        # with the same GPS requirement. Unlike the focal it is well
+        # conditioned: it is the pixel-radius profile every track samples
+        # across the frame. See BAConfig.refine_distortion for what an
+        # unmodelled lens does to a nadir strip.
         n_gps_priors = sum(1 for cp in problem.camera_priors if getattr(cp, "gps_position", None) is not None)
-        refine = bool(_match_cfg(state, "refine_intrinsics", False)) and n_gps_priors >= len(problem.cameras) // 2
+        enough_gps = n_gps_priors >= max(3, (len(problem.cameras) + 1) // 2)
+        refine = (bool(_match_cfg(state, "refine_intrinsics", False))
+                  and getattr(state, "intrinsics_provenance", "") == "default_guess"
+                  and enough_gps)
+        lens_known = getattr(state, "lens_distortion", None) is not None or any(
+            k is not None and k.dist_coeffs is not None for k in problem.intrinsics
+        )
+        refine_dist = bool(_match_cfg(state, "refine_distortion", True)) and not lens_known and enough_gps
         ba_config = bundle.BAConfig(
             max_iterations=int(_match_cfg(state, "ba_max_iterations", 100)),
-            refine_intrinsics=refine,
+            refine_shared_focal=refine,
+            refine_distortion=refine_dist,
+            gps_vertical_sigma_factor=float(_match_cfg(state, "gps_vertical_sigma_factor", 1.0) or 1.0),
         )
         fx_before = float(problem.intrinsics[0].fx) if problem.intrinsics else None
         logger.info(
-            "bundle adjustment: refine_intrinsics=%s (config=%s, %d/%d cameras carry a GPS position "
-            "prior, fx_before=%s)",
+            "bundle adjustment: refine shared focal=%s (config=%s), refine distortion=%s (lens known=%s); "
+            "%d/%d cameras carry a GPS position prior, fx_before=%s",
             refine,
             _match_cfg(state, "refine_intrinsics", False),
+            refine_dist,
+            lens_known,
             n_gps_priors,
             len(problem.cameras),
             f"{fx_before:.1f}" if fx_before else None,
         )
+        import os as _os
+
+        if _os.environ.get("DRISHTI_DUMP_BA"):
+            # Debug hook: the exact pose-prior problem, for offline iteration.
+            import pickle as _pickle
+
+            with open(_os.environ["DRISHTI_DUMP_BA"], "wb") as _fh:
+                _pickle.dump(
+                    {
+                        "problem": problem,
+                        "config": ba_config,
+                        "trackset": getattr(state, "matching_trackset", None),
+                        "intrinsics": getattr(state, "matching_intrinsics", None),
+                    },
+                    _fh,
+                )
+        # Cameras the images cannot pose keep their telemetry pose instead
+        # of being "refined" by a handful of observations: under-observed
+        # ones up front, then any the solve puts far from their own GPS fix
+        # or leaves with residuals far above the rest. Those are removed and
+        # the solve RESTARTED from the seeds: continuing from a solution they
+        # already bent keeps the bend. flight01 at the correct clock: 17
+        # turn-boundary keyframes with 1-14 observations, one camera pulled
+        # 36-38 m off GPS (208-camera flight), and three banking end-of-leg
+        # frames at 2.6 px that bowed the whole 12-camera clip.
+        full_problem = problem
+        counts = np.bincount(np.asarray(problem.obs_camera_idx, dtype=np.int64), minlength=len(problem.cameras))
+        min_obs = min(_MIN_CAMERA_OBSERVATIONS, 0.2 * float(np.median(counts))) if len(counts) else 0.0
+        unrefined.update(int(i) for i in np.flatnonzero(counts < min_obs))
+        if unrefined:
+            logger.info("bundle adjustment: %d camera(s) with fewer than %.0f observations keep their telemetry pose: %s",
+                        len(unrefined), min_obs, sorted(unrefined))
+            problem = _problem_without_cameras(full_problem, unrefined)
         result = bundle.bundle_adjust(problem, ba_config)
+        # Scales with the prior sigma (2.5 m since the Schur solver, so 10 m).
+        # A 20 m test was tried: DJI_1001 kept 6 end-of-flight cameras whose
+        # images disagree with the log, one was then pulled 32.9 m off its
+        # fix, and the camera gate rejected the whole solution.
+        gps_sigma = {cp.camera_idx: (cp.gps_sigma_m or ba_config.gps_sigma_m_default)
+                     for cp in problem.camera_priors if getattr(cp, "gps_position", None) is not None}
+        max_unrefined = max(1, int(_MAX_UNREFINED_CAMERA_FRACTION * len(problem.cameras)))
+        for _ in range(3):
+            vfac = float(getattr(ba_config, "gps_vertical_sigma_factor", 1.0) or 1.0)
+            outliers = {i for i, s in gps_sigma.items()
+                        if i not in unrefined and i in gps
+                        and np.linalg.norm((np.asarray(result.poses[i].t, dtype=np.float64) - gps[i])
+                                           * np.array([1.0, 1.0, 1.0 / vfac])) > _CAMERA_GPS_OUTLIER_SIGMAS * s}
+            residuals = getattr(result, "residuals_px", None)
+            if residuals is not None and len(residuals) == len(problem.obs_camera_idx) and len(residuals):
+                err = np.linalg.norm(np.asarray(residuals), axis=1)
+                cut = max(1.5, 4.0 * float(np.median(err)))
+                cams = np.asarray(problem.obs_camera_idx)
+                outliers |= {int(i) for i in np.unique(cams)
+                             if int(i) not in unrefined and float(np.median(err[cams == i])) > cut}
+            if not outliers or len(unrefined | outliers) > max_unrefined:
+                unrefined |= outliers
+                break
+            unrefined |= outliers
+            logger.warning("bundle adjustment: cameras %s disagree with GPS or with the other cameras' tracks; "
+                           "restarting without their observations", sorted(outliers))
+            problem = _problem_without_cameras(full_problem, unrefined)
+            result = bundle.bundle_adjust(problem, ba_config)
+        if len(unrefined) > max_unrefined:
+            from drishti3d.geometry.pose_validation import ReconstructionRejected
+
+            raise ReconstructionRejected(
+                f"bundle adjustment rejected: {len(unrefined)}/{len(problem.cameras)} cameras could not be posed "
+                f"from the images (under-observed or inconsistent: {sorted(unrefined)})"
+            )
+        validation = validate_result(result, problem)
+        pass1_problem, pass1_intrinsics = problem, list(result.intrinsics)
+        lens = getattr(result, "lens", None) if refine_dist else None
+        lens_dist = _dist_vector([lens["k1"], lens["k2"]]) if lens and "k1" in lens else None
         pass1 = {
             "ba_pass1_points": int(problem.points.shape[0]),
             "ba_pass1_rmse_before_px": result.rmse_before_px,
             "ba_pass1_rmse_after_px": result.rmse_after_px,
             "ba_pass1_converged": result.converged,
         }
+        if lens is not None:
+            pass1["ba_pass1_lens"] = {k: round(float(v), 5) for k, v in lens.items()}
 
         # Pass 2: re-triangulate every angle-filtered track against the
         # refined poses, apply the strict gate, and solve again. With the
@@ -3374,6 +4974,20 @@ class BundleAdjustmentStage(PipelineStage):
         intrinsics_list = getattr(state, "matching_intrinsics", None)
         pass2: dict = {}
         if trackset is not None and intrinsics_list is not None:
+            # Re-triangulation must use the lens that produced these poses.
+            intrinsics_list = result.intrinsics
+            if lens_dist is not None:
+                # Triangulation is pinhole, so pass 2 works on undistorted
+                # COPIES of the tracks with the lens held fixed. The stored
+                # tracks and frames change only once everything validates.
+                from dataclasses import replace as _replace
+
+                trackset = _undistorted_trackset(trackset, intrinsics_list, lens_dist)
+                intrinsics_list = [_replace(k, dist_coeffs=None) for k in intrinsics_list]
+                ba_config = _replace(ba_config, refine_distortion=False, refine_shared_focal=False)
+            if unrefined:
+                # Unposed cameras sit at telemetry: never triangulate through them.
+                trackset = _tracks_without_cameras(trackset, unrefined)
             from drishti3d.geometry import triangulate as triangulate_mod
 
             _check_cancel(cancel_token)
@@ -3391,10 +5005,24 @@ class BundleAdjustmentStage(PipelineStage):
                 max_px=_MAX_REPROJECTION_PX,
                 max_points=_match_cfg(state, "max_points_in_ba", None),
             )
-            if len(kept2) >= _MIN_TRACKS_FOR_BA:
+            n_cams = len(problem.cameras)
+            cams_before = int((np.bincount(np.asarray(problem.obs_camera_idx), minlength=n_cams) > 0).sum())
+            cams_after = len({obs[0] for t in kept2.tracks for obs in t.observations})
+            if len(kept2) >= _MIN_TRACKS_FOR_BA and cams_after < cams_before:
+                # Pass 2 would leave cameras with no observation that pass 1
+                # constrained (flight01: 213 of 301, because long LightGlue
+                # tracks fail the gate on one bad view). Those cameras would
+                # then follow their priors alone -- keep pass 1 instead.
+                logger.warning(
+                    "bundle adjustment: pass 2 would observe %d/%d cameras (pass 1: %d); keeping pass 1",
+                    cams_after, n_cams, cams_before,
+                )
+                pass2 = {"ba_pass2_points": int(len(kept2)), "ba_pass2_skipped": True, "ba_pass2_cameras": cams_after}
+            elif len(kept2) >= _MIN_TRACKS_FOR_BA:
                 problem2 = triangulate_mod.build_ba_problem(kept2, result.poses, intrinsics_list, pts2)
                 problem2.camera_priors = problem.camera_priors
                 result2 = bundle.bundle_adjust(problem2, ba_config)
+                validation = validate_result(result2, problem2)
                 pass2 = {
                     "ba_pass2_tracks_retriangulated": int(valid.sum()),
                     "ba_pass2_points": int(problem2.points.shape[0]),
@@ -3405,78 +5033,40 @@ class BundleAdjustmentStage(PipelineStage):
                 problem, result = problem2, result2
                 state.matching_problem = problem2
             else:
-                logger.warning(
-                    "bundle adjustment: pass 2 kept only %d tracks under the %.0f px gate; keeping pass 1",
-                    len(kept2),
-                    _MAX_REPROJECTION_PX,
+                from drishti3d.geometry.pose_validation import ReconstructionRejected
+                raise ReconstructionRejected(
+                    f"bundle adjustment rejected: only {len(kept2)} tracks survive re-triangulation "
+                    f"with the solved cameras (need {_MIN_TRACKS_FOR_BA}); verify synchronization/calibration"
                 )
-                pass2 = {"ba_pass2_points": int(len(kept2)), "ba_pass2_skipped": True}
 
-        if refine and result.intrinsics and fx_before:
-            # Apply the refinement as a RATIO, never as an absolute value.
-            # `problem.intrinsics` are whatever resolution matching ran at
-            # -- with the keyframe cache that is 1920 px, half of native --
-            # so result.intrinsics carry that width/height too. Writing
-            # them onto native-resolution keyframes would halve fx. The
-            # ratio is scale-invariant and is the actual finding.
-            # Read the FREE cameras only, and take their median.
-            #
-            # Two cameras are gauge-fixed (bundle._build_layout skips them),
-            # and _unpack_x returns a fixed camera's intrinsics UNCHANGED.
-            # Reading result.intrinsics[0] therefore always reports the
-            # seed value and makes refinement look like a no-op -- measured
-            # 1.000x while the free cameras had in fact moved to 1.206x.
-            #
-            # Median across free cameras, not one of them: BA refines each
-            # camera's intrinsics independently, but this is ONE physical
-            # lens, so the per-camera spread (2418-2759 px in a controlled
-            # test) is estimation noise around a single true value.
-            free = [
-                i for i in range(len(result.intrinsics)) if i not in problem.fixed_camera_indices
-            ]
-            if not free:
-                logger.info("bundle adjustment: every camera is gauge-fixed; focal length not refined")
-                factor = 1.0
-            else:
-                factor = float(np.median([result.intrinsics[i].fx for i in free])) / fx_before
-            if factor == 1.0:
-                pass  # nothing free to refine; already reported above
-            elif not (_MIN_FOCAL_REFINE_FACTOR <= factor <= _MAX_FOCAL_REFINE_FACTOR):
-                logger.warning(
-                    "bundle adjustment: focal refinement returned %.2fx, outside [%.1f, %.1f] -- "
-                    "rejecting it and keeping the intrinsics prior. A correction this large means the "
-                    "solve went somewhere unphysical, not that the lens is that different.",
-                    factor,
-                    _MIN_FOCAL_REFINE_FACTOR,
-                    _MAX_FOCAL_REFINE_FACTOR,
+        # Commit exactly the validated calibration, including fy and principal
+        # point. A median-focal substitution no longer projects the solved points.
+        if refine:
+            for kf, solved in zip(state.keyframes, result.intrinsics, strict=True):
+                native = kf.intrinsics or state.intrinsics
+                sx, sy = native.width / solved.width, native.height / solved.height
+                kf.intrinsics = CameraIntrinsics(
+                    fx=solved.fx * sx, fy=solved.fy * sy,
+                    cx=solved.cx * sx, cy=solved.cy * sy,
+                    width=native.width, height=native.height, dist_coeffs=native.dist_coeffs,
                 )
-            else:
-                native_before = float((state.keyframes[0].intrinsics or state.intrinsics).fx)
-                for kf in state.keyframes:
-                    base = kf.intrinsics or state.intrinsics
-                    if base is not None:
-                        kf.intrinsics = _rescale_focal(base, factor)
-                if state.intrinsics is not None:
-                    state.intrinsics = _rescale_focal(state.intrinsics, factor)
-                state.refined_focal_px = native_before * factor
-                state.focal_refine_factor = factor
-                spread = [result.intrinsics[i].fx for i in free]
-                logger.info(
-                    "bundle adjustment: focal length refined %.0f px -> %.0f px (%.3fx) at native "
-                    "resolution. Median over %d free cameras (%.0f-%.0f px spread; %d gauge-fixed "
-                    "cameras excluded), from %d tracks with %d GPS position priors. The prior was a "
-                    "generic HFOV guess (provenance %r), not a measurement.",
-                    native_before,
-                    state.refined_focal_px,
-                    factor,
-                    len(free),
-                    min(spread),
-                    max(spread),
-                    len(problem.fixed_camera_indices),
-                    int(problem.points.shape[0]),
-                    n_gps_priors,
-                    getattr(state, "intrinsics_provenance", "unknown"),
-                )
+            state.intrinsics = state.keyframes[0].intrinsics
+            state.intrinsics_provenance = "bundle_adjusted"
+        if lens_dist is not None:
+            # From here on every frame is undistorted and every intrinsics is
+            # the pinhole K; stored tracks move with it (see _install_lens).
+            track_intrinsics = [CameraIntrinsics(fx=k.fx, fy=k.fy, cx=k.cx, cy=k.cy, width=k.width, height=k.height)
+                                for k in pass1_intrinsics]
+            if problem is pass1_problem:
+                for cam in np.unique(problem.obs_camera_idx):
+                    sel = problem.obs_camera_idx == cam
+                    problem.obs_uv[sel] = _undistort_pixels(problem.obs_uv[sel], track_intrinsics[int(cam)], lens_dist)
+                result.intrinsics = track_intrinsics
+            _install_lens(state, lens_dist, source="bundle_adjusted", track_intrinsics=track_intrinsics)
+        state.matching_intrinsics = list(result.intrinsics)
+        validation = {**validation, "unrefined_cameras": len(unrefined)}
+        state.camera_validation = validation
+        state.unrefined_keyframes = sorted(unrefined)
 
         state.poses = result.poses
         # The refined sparse points and which camera saw which: the
@@ -3484,6 +5074,7 @@ class BundleAdjustmentStage(PipelineStage):
         state.ba_points = np.asarray(result.points, dtype=np.float64)
         state.ba_obs_camera_idx = np.asarray(problem.obs_camera_idx)
         state.ba_obs_point_idx = np.asarray(problem.obs_point_idx)
+        _densify_fit_points(state, result.poses)
         # Stashed for ExportStage's accuracy report card (see that class's
         # docstring on why it can't just read this stage's own returned
         # ``artifacts``/``StageResult`` -- the runner only assembles those
@@ -3493,6 +5084,7 @@ class BundleAdjustmentStage(PipelineStage):
 
         artifacts = {
             **match_artifacts,
+            "camera_validation": validation,
             "ba_cameras": len(problem.cameras),
             "ba_points": int(problem.points.shape[0]),
             "ba_observations": int(problem.obs_uv.shape[0]),
@@ -3503,11 +5095,18 @@ class BundleAdjustmentStage(PipelineStage):
             **pass1,
             **pass2,
         }
+        if lens_dist is not None:
+            artifacts["lens_distortion"] = state.lens_distortion
+        artifacts["unrefined_cameras"] = sorted(unrefined)
         message = (
             f"{match_message}; bundle adjustment over {len(problem.cameras)} cameras / "
             f"{problem.points.shape[0]} points ({len(problem.camera_priors)} camera priors): "
             f"reprojection RMSE {result.rmse_before_px:.2f}px -> {result.rmse_after_px:.2f}px"
         )
+        if unrefined:
+            message += f"; {len(unrefined)} camera(s) the images could not pose kept their telemetry pose"
+        if lens_dist is not None:
+            message += f"; lens k1={lens_dist[0]:.3f} k2={lens_dist[1]:.3f} solved and frames undistorted"
         return artifacts, message
 
 
@@ -3543,6 +5142,83 @@ class FusionStage(PipelineStage):
 
     name = "fusion"
 
+    def _from_heightmap(self, state, hm):
+        """Nadir world-frame flights: the median-vote height map IS the fused surface (fusion.heightmap).
+
+        Placement is checked by run() before either fusion path. A median
+        vote does not excuse failed placement. An explicit override may
+        produce a diagnostic mesh, but never promotes its quality outcome.
+        """
+        verts, faces = hm.mesh()
+        # Height-field surfaces carry a planar true-ortho texture: its UVs
+        # follow the vertices through the filter below and, being planar,
+        # through georeferencing too (ExportStage writes the textured mesh).
+        uv = None
+        if getattr(hm, "texture_rgb", None) is not None and hasattr(hm, "vertex_uv"):
+            # mesh()'s vertices (walls add duplicates), not point_cloud()'s.
+            uv = hm.mesh_vertex_uv() if hasattr(hm, "mesh_vertex_uv") else hm.vertex_uv()
+        # Height-map fusion used to return before the source-image filter,
+        # silently ignoring photometric_reject_before_mesh for nadir flights.
+        # Delete rejected vertices and their incident triangles, without
+        # bridging holes or moving an observed surface to make it look smooth.
+        rejected = 0
+        # A height-field surface was CHOSEN by photo-consistency: every cell is
+        # the height where its views agree (geometry.heightfield). The post-hoc
+        # test here uses other windows and thresholds, and on PinPoint flight01
+        # it removed most of the surface the surveyed points fall on (18 of 64
+        # rays hit the mesh with it, 55 of 64 without), so it is not re-applied.
+        photo_consistent = bool(getattr(hm, "photo_consistent", False))
+        point_filter = None if photo_consistent else self._photometric_point_filter(state)
+        if point_filter is not None and len(verts.xyz):
+            keep = point_filter(verts)
+            rejected = int((~keep).sum())
+            if rejected:
+                remap = np.full(len(keep), -1, dtype=np.int64)
+                remap[keep] = np.arange(int(keep.sum()))
+                faces = remap[faces[keep[faces].all(axis=1)]]
+                if uv is not None:
+                    uv = uv[keep]
+                verts = PointCloud(
+                    xyz=verts.xyz[keep],
+                    rgb=verts.rgb[keep] if verts.rgb is not None else None,
+                    confidence=verts.confidence[keep] if verts.confidence is not None else None,
+                    uncertainty_m=verts.uncertainty_m[keep] if verts.uncertainty_m is not None else None,
+                )
+        conf = verts.confidence
+        tiers = {
+            "measured": float(np.mean(conf == int(Confidence.MEASURED))) if conf is not None and conf.size else 0.0,
+            "low_confidence": float(np.mean(conf == int(Confidence.LOW_CONFIDENCE))) if conf is not None and conf.size else 0.0,
+            "inferred": float(np.mean(conf == int(Confidence.INFERRED))) if conf is not None and conf.size else 0.0,
+        }
+        state.point_cloud = verts
+        state.mesh_faces = faces if faces.size else None
+        state.mesh_uv = uv
+        state.mesh_texture = hm.texture_rgb if uv is not None else None
+        state.fusion_confidence_source = (
+            "multiview_depth_consistency" if getattr(state, "geometry_premeshed", False)
+            else "heightmap_view_agreement"
+        )
+        placement = getattr(state, "placement_report", None)
+        verdict = getattr(placement, "verdict", None)
+        artifacts = {
+            "method": "mvs3d_tsdf" if getattr(state, "geometry_premeshed", False) else "median_heightmap",
+            "photometric_points_rejected": rejected,
+            "cell_m": round(hm.cell_m, 3),
+            "vertices": int(verts.xyz.shape[0]),
+            "faces": int(faces.shape[0]),
+            "tier_fractions": {k: round(v, 4) for k, v in tiers.items()},
+            "placement_verdict": verdict,
+        }
+        surface_name = "volumetric stereo mesh" if getattr(state, "geometry_premeshed", False) else "median height map"
+        message = (
+            f"{surface_name}: {verts.xyz.shape[0]} vertices, {faces.shape[0]} faces at {hm.cell_m:.2f} m; "
+            f"measured {tiers['measured']:.0%}, low {tiers['low_confidence']:.0%}, inferred {tiers['inferred']:.0%}"
+        )
+        if verdict == "FAIL":
+            message += " (placement FAILED: views disagree -- see confidence tiers)"
+            logger.warning("fusion: %s", message)
+        return artifacts, message
+
     def run(self, state, cancel_token, progress_cb, partial_cb=None):
         _check_cancel(cancel_token)
 
@@ -3553,6 +5229,29 @@ class FusionStage(PipelineStage):
 
         if not state.submaps:
             raise StageUnavailable("fusion: no submaps to fuse (geometry stage produced none)")
+
+        hm = getattr(state, "incremental_fusion", None)
+        # Placement FAIL blocks fusion: windows metres apart mesh into
+        # several copies of one surface, and a model that looks finished
+        # would hide the defect. Export still writes the merged point
+        # cloud and the report card says why there is no mesh.
+        placement = getattr(state, "placement_report", None)
+        if placement is not None and getattr(placement, "verdict", None) == "FAIL":
+            state.report.update(outcome="failed", diagnostic_output=True,
+                                quality_reasons=["Frame placement failed: " + placement.summary()],
+                                placement=placement.as_dict())
+        if (
+            placement is not None
+            and getattr(placement, "verdict", None) == "FAIL"
+            and not getattr(state.config.fusion, "allow_failed_placement", False)
+        ):
+            raise RuntimeError(
+                f"fusion: blocked -- frame placement FAILED ({placement.summary()}). "
+                "Retained geometry is diagnostic output only."
+            )
+
+        if (getattr(state, "geometry_heightmap", False) or getattr(state, "geometry_premeshed", False)) and hm is not None and hasattr(hm, "mesh"):
+            return self._from_heightmap(state, hm)
 
         _check_cancel(cancel_token)
 
@@ -3602,6 +5301,11 @@ class FusionStage(PipelineStage):
                 # geometry.overlap_align, which is the merge's only
                 # absolute vertical reference and must always have them.
                 keyframe_altitude_m=self._keyframe_altitudes(state),
+                # Depth fitted to bundle-adjusted points (world-frame windows).
+                anchored=bool(getattr(state, "geometry_world_frame", False)),
+                # A close, forward camera's GSD is millimetres over a 40 m scene:
+                # keep the untiled grid to a size that fuses in about a minute.
+                dense_grid_budget=_DENSE_GRID_VOXEL_BUDGET if _camera_not_nadir(state.keyframes) else None,
             )
         except ImportError as exc:
             raise StageUnavailable(f"drishti3d.fusion.tsdf.fuse_submaps not fully available yet: {exc}") from exc
@@ -4122,6 +5826,23 @@ class FusionStage(PipelineStage):
         return out
 
 
+_DENSE_GRID_VOXEL_BUDGET = 8_000_000
+
+
+def _camera_not_nadir(keyframes) -> bool:
+    """True when the logged gimbal pitch is more than 30 deg from straight down (forward/oblique footage)."""
+    pitches = [kf.telemetry.gimbal_pitch for kf in keyframes or []
+               if kf.telemetry is not None and kf.telemetry.gimbal_pitch is not None]
+    return bool(pitches) and abs(float(np.median(pitches)) + 90.0) > 30.0
+
+
+def _scale_uncertainty(sigma_m: np.ndarray | None, transform) -> np.ndarray | None:
+    """A similarity scales every length, so a 1-sigma height in metres scales with it."""
+    if sigma_m is None:
+        return None
+    return (np.asarray(sigma_m, dtype=np.float32) * np.float32(transform.scale)).astype(np.float32)
+
+
 def _transform_covariance(covariance: np.ndarray | None, transform) -> np.ndarray | None:
     """Propagate per-point covariance through a ``geometry.submap.Sim3`` transform.
 
@@ -4168,6 +5889,20 @@ def _apply_georeferencing(state: PipelineState) -> dict:
     """
     not_computed = {"relative_rmse_m": None, "absolute_rmse_m": None, "scale_error_pct": None, "georef_notes": None}
 
+    accuracy_cfg = getattr(state.config, "accuracy", None)
+    control_path = getattr(accuracy_cfg, "control_points_path", None)
+    control_network = None
+    if control_path:
+        try:
+            from drishti3d.geometry.control_points import load_control_points
+
+            control_network = load_control_points(control_path)
+            state.control_point_network = control_network
+        except ValueError as exc:
+            state.accuracy_validation_error = str(exc)
+            logger.error("export: refusing invalid control-point network: %s", exc)
+            return not_computed
+
     if state.telemetry_path is None or not state.keyframes or len(state.poses) != len(state.keyframes):
         return not_computed
     if state.point_cloud is None:
@@ -4206,9 +5941,19 @@ def _apply_georeferencing(state: PipelineState) -> dict:
         # one number (the exported, georeferenced point cloud) that
         # actually matters -- see geometry.georef.align_to_gps's
         # fixed_rotation docstring for the full reasoning.
-        fixed_rotation = np.eye(3) if getattr(state, "geometry_merge_strategy", None) == "telemetry_rotation" else None
+        # Poses already in the GPS/ENU frame keep their rotation (see
+        # align_to_gps): re-fitting it from a near-collinear strip's camera
+        # centres only adds a free roll about the flight line. flight01's
+        # 20 s world-frame model came out rolled 14 deg that way.
+        world_frame = getattr(state, "geometry_merge_strategy", None) in ("telemetry_rotation", "world_frame")
+        fixed_rotation = np.eye(3) if world_frame else None
         result = georeference(
-            state.point_cloud, state.poses, telemetry, relative_accuracy_m=None, fixed_rotation=fixed_rotation
+            state.point_cloud,
+            state.poses,
+            telemetry,
+            gcps=control_network.georeference_gcps() if control_network is not None else None,
+            relative_accuracy_m=None,
+            fixed_rotation=fixed_rotation,
         )
     except ValueError:
         # Fewer than 3 geo-tagged samples, or some other precondition
@@ -4231,8 +5976,19 @@ def _apply_georeferencing(state: PipelineState) -> dict:
         # here and in the raw-cloud rebuild below, or it dies at this line.
         semantic_class=state.point_cloud.semantic_class,
         semantic_confidence=state.point_cloud.semantic_confidence,
+        uncertainty_m=_scale_uncertainty(state.point_cloud.uncertainty_m, result.transform),
     )
     state.poses = [result.transform.apply_pose(p) for p in state.poses]
+    # Kept so export can write TRUE map coordinates: the model is now in
+    # local ENU about this origin, and `crs` is the UTM zone containing it.
+    state.georef_origin = result.origin
+    state.georef_crs = result.crs
+    if control_network is not None:
+        from drishti3d.geometry.control_points import transformed_checkpoint_xyz
+
+        # Keep the named checkpoint observations separate from the cloud.
+        # They follow every subsequent export transform, then are scored.
+        state.checkpoint_predicted_enu = transformed_checkpoint_xyz(control_network, result.transform)
 
     # FusionStage's raw (pre-TSDF) fused point cloud (Fix 2) lives in the
     # exact same local frame state.point_cloud was just transformed out of
@@ -4249,6 +6005,7 @@ def _apply_georeferencing(state: PipelineState) -> dict:
             confidence=raw_pc.confidence,
             semantic_class=raw_pc.semantic_class,
             semantic_confidence=raw_pc.semantic_confidence,
+            uncertainty_m=_scale_uncertainty(raw_pc.uncertainty_m, result.transform),
         )
 
     # Silent scale error is the worst failure mode this system can have
@@ -4295,6 +6052,173 @@ def _apply_georeferencing(state: PipelineState) -> dict:
     }
 
 
+def _evaluate_independent_accuracy(state) -> dict | None:
+    """Score withheld named checkpoints after every export transform."""
+    error = getattr(state, "accuracy_validation_error", None)
+    if error:
+        return {
+            "method": "named withheld survey correspondences",
+            "target_assessment": "invalid",
+            "meets_target": None,
+            "assessment_reason": error,
+        }
+    network = getattr(state, "control_point_network", None)
+    predicted = getattr(state, "checkpoint_predicted_enu", None)
+    origin = getattr(state, "georef_origin", None)
+    if network is None:
+        return None
+    if predicted is None or origin is None:
+        return {
+            "method": "named withheld survey correspondences",
+            "target_assessment": "not established",
+            "meets_target": None,
+            "assessment_reason": "control network was supplied but final georeferencing was not computed",
+        }
+
+    from drishti3d.geometry.control_points import checkpoint_metrics, update_run_history
+
+    cfg = state.config.accuracy
+    metrics = checkpoint_metrics(
+        network,
+        predicted,
+        origin,
+        target_m=cfg.target_m,
+        minimum_checkpoints=cfg.minimum_checkpoints,
+    )
+    if metrics["n_checkpoints"]:
+        history_path = Path(cfg.history_path) if cfg.history_path else Path(state.config.export.output_dir) / "accuracy_runs.json"
+        try:
+            metrics["repeatability"] = update_run_history(
+                history_path, network, metrics, run_id=cfg.run_id
+            )
+            metrics["history_path"] = str(history_path)
+        except (OSError, ValueError) as exc:
+            logger.warning("export: accuracy repeatability history was not updated: %s", exc)
+            metrics["repeatability"] = {"status": "not computed", "reason": str(exc)}
+    else:
+        metrics["repeatability"] = {
+            "status": "not computed",
+            "reason": "no independent checkpoints were supplied",
+        }
+    return metrics
+
+
+def _apply_reference_alignment(state) -> dict | None:
+    """Correct the GPS-georeferenced model against a reference orthophoto/DEM, when one is configured."""
+    rcfg = getattr(state.config, "reference", None)
+    origin = getattr(state, "georef_origin", None)
+    if rcfg is None or not rcfg.ortho_path or origin is None or state.point_cloud is None:
+        return None
+    pc = state.point_cloud
+    if pc.rgb is None or pc.xyz.shape[0] < 1000:
+        return {"applied": False, "failure": "model has no colour or too few points to render"}
+    try:
+        from drishti3d.geometry.reference_align import align_to_reference, apply_to_enu
+
+        al = align_to_reference(
+            pc.xyz, pc.rgb, origin, rcfg.ortho_path, rcfg.dem_path,
+            gsd=rcfg.gsd_m, min_inliers=rcfg.min_inliers, max_shift_m=rcfg.max_shift_m,
+            fit=getattr(rcfg, "fit", "translation"),
+        )
+    except Exception as exc:
+        logger.warning("reference align failed; keeping GPS georeferencing", exc_info=True)
+        return {"applied": False, "failure": f"exception: {exc}"}
+    report = al.as_dict()
+    report["ortho"] = str(rcfg.ortho_path)
+    report["dem"] = str(rcfg.dem_path) if rcfg.dem_path else None
+    if not al.applied:
+        logger.warning("reference align refused: %s", al.failure)
+        state.reference_alignment = report
+        return report
+
+    from dataclasses import replace
+
+    state.point_cloud = replace(pc, xyz=apply_to_enu(al, pc.xyz))
+    raw = getattr(state, "fusion_raw_point_cloud", None)
+    if raw is not None and raw.xyz.shape[0]:
+        state.fusion_raw_point_cloud = replace(raw, xyz=apply_to_enu(al, raw.xyz))
+    th = np.radians(al.rot_deg)
+    Rz = np.array([[np.cos(th), -np.sin(th), 0.0], [np.sin(th), np.cos(th), 0.0], [0.0, 0.0, 1.0]])
+    state.poses = [
+        None if p is None else Pose(R=Rz @ np.asarray(p.R), t=apply_to_enu(al, np.asarray(p.t).reshape(1, 3))[0])
+        for p in state.poses
+    ]
+    checkpoint_xyz = getattr(state, "checkpoint_predicted_enu", None)
+    if checkpoint_xyz is not None:
+        state.checkpoint_predicted_enu = apply_to_enu(al, checkpoint_xyz)
+    state.reference_alignment = report
+    return report
+
+
+def _heightfield_raster_cell(state) -> float | None:
+    """The height-field surface's cell size when it produced the exported mesh, else None (auto)."""
+    hm = getattr(state, "incremental_fusion", None)
+    if getattr(hm, "photo_consistent", False) and getattr(hm, "cell_m", None):
+        return float(hm.cell_m)
+    return None
+
+
+def _true_ortho_payload(state):
+    """(texture, uv) for the exported vertices when the mesh carries a planar true-ortho texture."""
+    uv = getattr(state, "mesh_uv", None)
+    texture = getattr(state, "mesh_texture", None)
+    pc = state.point_cloud
+    if uv is None or texture is None or pc is None or len(uv) != len(pc.xyz):
+        return None
+    return texture, uv
+
+
+def _write_cameras_json(state, output_dir: Path) -> Path | None:
+    """Every keyframe's refined camera, in the exported model's frame, plus its GPS fix.
+
+    What an external checker needs to score the model against surveyed
+    points: cast a pixel's ray from the camera and see where it lands on
+    the model. The GPS fix travels with each camera so a checker can
+    recover the model-to-geographic transform itself instead of trusting
+    this pipeline's own georeferencing.
+
+    ``intrinsics.dist_coeffs`` is the RAW video's lens (OpenCV order, or
+    ``None``): a pixel of the original video must be undistorted with
+    ``(K, dist_coeffs)`` -- new camera matrix ``K`` -- before its ray is cast.
+    """
+    import json
+
+    poses = list(getattr(state, "poses", None) or [])
+    if not state.keyframes or len(poses) != len(state.keyframes):
+        return None
+    lens = getattr(state, "lens_distortion", None)
+    cams = []
+    for i, (kf, pose) in enumerate(zip(state.keyframes, poses, strict=True)):
+        if pose is None:
+            continue
+        intr = kf.intrinsics or state.intrinsics
+        geo = getattr(getattr(kf, "telemetry", None), "geo", None)
+        dist = lens["dist_coeffs"] if lens is not None else (
+            None if intr is None or intr.dist_coeffs is None else np.asarray(intr.dist_coeffs, dtype=float).tolist()
+        )
+        cams.append(
+            {
+                "keyframe": i,
+                "frame_index": int(kf.frame_index),
+                "timestamp_s": float(kf.timestamp),
+                "R_world_from_cam": np.asarray(pose.R, dtype=float).round(9).tolist(),
+                "t_world": np.asarray(pose.t, dtype=float).round(4).tolist(),
+                "intrinsics": None
+                if intr is None
+                else {**{k: float(getattr(intr, k)) for k in ("fx", "fy", "cx", "cy", "width", "height")},
+                      "dist_coeffs": dist},
+                "gps": None if geo is None else {"lat": geo.lat, "lon": geo.lon, "alt_msl": geo.alt_msl},
+            }
+        )
+    path = Path(output_dir) / "cameras.json"
+    try:
+        path.write_text(json.dumps({"frame": "same as model.ply", "cameras": cams}))
+    except OSError:
+        logger.warning("export: could not write %s", path, exc_info=True)
+        return None
+    return path
+
+
 class ExportStage(PipelineStage):
     """Writes the final deliverables (PLY/LAS/GLB/OBJ/XYZ, rasters, report card) via ``drishti3d.export.export_all``.
 
@@ -4328,6 +6252,8 @@ class ExportStage(PipelineStage):
         # this point on (result_or_pointcloud, `poses=state.poses` below)
         # must see the georeferenced version, not the raw local-frame one.
         georef_report = _apply_georeferencing(state)
+        _apply_reference_alignment(state)
+        independent_accuracy = _evaluate_independent_accuracy(state)
 
         export_cfg = state.config.export
         formats = {"glb", "xyz"}
@@ -4367,6 +6293,11 @@ class ExportStage(PipelineStage):
         report_artifacts: dict = {
             "keyframe_count": len(state.keyframes),
             "confidence_source": getattr(state, "fusion_confidence_source", None),
+            "reconstruction_representation": (
+                "2.5D height-field surface" if getattr(state, "geometry_heightmap", False)
+                else "3D volumetric mesh" if state.mesh_faces is not None and len(state.mesh_faces)
+                else "3D point cloud (no mesh)"
+            ),
         }
 
         mean_reprojection_error_px = getattr(state, "mean_reprojection_error_px", None)
@@ -4387,6 +6318,8 @@ class ExportStage(PipelineStage):
             report_artifacts["telemetry_offset_s"] = state.telemetry_stats["time_offset_s"]
             report_artifacts["telemetry_offset_source"] = state.telemetry_stats.get("offset_source")
             report_artifacts["telemetry_format"] = state.telemetry_stats.get("format")
+        if state.telemetry_stats.get("time_sync"):
+            report_artifacts["time_sync"] = state.telemetry_stats["time_sync"]
         if "telemetry_video_coverage_fraction" in state.telemetry_stats:
             report_artifacts["telemetry_video_coverage_fraction"] = state.telemetry_stats[
                 "telemetry_video_coverage_fraction"
@@ -4395,6 +6328,10 @@ class ExportStage(PipelineStage):
         stage_timings = getattr(state, "stage_timings_s", None)
         if stage_timings:
             report_artifacts["stage_timings_s"] = dict(stage_timings)
+        if getattr(state, "first_patch_s", None) is not None:
+            report_artifacts["first_fused_patch_s"] = round(state.first_patch_s, 1)
+        if getattr(state, "reference_alignment", None) is not None:
+            report_artifacts["reference_alignment"] = state.reference_alignment
 
         # Prefer GeometryStage's own already-computed junction diagnostics
         # (state.geometry_junction_residuals -- computed with the actual
@@ -4440,6 +6377,10 @@ class ExportStage(PipelineStage):
         merge_strategy_warnings = getattr(state, "geometry_merge_strategy_warnings", None)
         if merge_strategy_warnings:
             report_artifacts["merge_strategy_warnings"] = merge_strategy_warnings
+        if getattr(state, "mvs3d_diagnostics", None):
+            report_artifacts["dense_surface"] = state.mvs3d_diagnostics
+        if getattr(state, "heightfield_diagnostics", None):
+            report_artifacts["dense_surface"] = state.heightfield_diagnostics
 
         # Scene composition. Every key is set only when semantics actually
         # ran -- an absent key is what makes build_report render
@@ -4465,6 +6406,8 @@ class ExportStage(PipelineStage):
             report_artifacts["dynamic_points_removed"] = dynamic_removed
 
         report_artifacts.update(georef_report)
+        if independent_accuracy is not None:
+            report_artifacts["independent_accuracy"] = independent_accuracy
 
         # Fix 2: the raw, cleaned (pre-TSDF, never coarsely voxelised) dense
         # point cloud FusionStage stashed -- written independently of
@@ -4478,23 +6421,51 @@ class ExportStage(PipelineStage):
             raw_point_cloud = None
 
         output_dir = Path(export_cfg.output_dir)
+        from drishti3d.pipeline.quality import quality_fields
+
+        quality_report = {**report_artifacts, **state.report,
+                          "backbone": state.backbone_name,
+                          "camera_validation": getattr(state, "camera_validation", None)}
+        quality = quality_fields(quality_report, getattr(state, "stage_results", []),
+                                 state.point_cloud is not None and len(state.point_cloud.xyz) > 0)
+        report_artifacts.update(quality)
+        state.report.update(quality)
+        if quality["diagnostic_output"]:
+            output_dir = output_dir / "diagnostic"
         # ``export_all`` builds the accuracy report card on its way to
         # writing report.html/report.txt. Capture it: it is the ONLY
         # place those numbers are computed, and a GUI that cannot show
         # them is a survey tool that will not state its own accuracy.
         report_card: dict = {}
+        geo_origin = getattr(state, "georef_origin", None)
+        geo_crs = getattr(state, "georef_crs", None)
         written = export_all(
             result_or_pointcloud,
             output_dir,
             formats=formats,
-            crs=export_cfg.crs,
+            crs=geo_crs if geo_origin is not None else export_cfg.crs,
+            geo_origin=geo_origin,
             poses=state.poses,
             report_artifacts=report_artifacts,
             raw_point_cloud=raw_point_cloud,
             report_out=report_card,
+            # Height-field surfaces: rasters at the surface's own cell and the
+            # orthomosaic from its true-ortho texture, not the extent-derived
+            # ~1.3 m vertex rasterization.
+            resolution_m=_heightfield_raster_cell(state),
+            ortho_texture=_true_ortho_payload(state),
+            uncertainty_m=state.point_cloud.uncertainty_m if state.point_cloud is not None else None,
         )
+        import json
+
+        quality_path = output_dir / "quality.json"
+        quality_path.write_text(json.dumps(quality, indent=2))
+        written["quality"] = quality_path
 
         texture_stats = self._bake_texture(state, output_dir, written)
+        cameras_path = _write_cameras_json(state, output_dir)
+        if cameras_path is not None:
+            written["cameras"] = cameras_path
 
         artifacts = {"applied": True, "output_dir": str(output_dir), "files": {k: str(v) for k, v in written.items()}}
         if texture_stats:
@@ -4514,6 +6485,44 @@ class ExportStage(PipelineStage):
         return artifacts, message
 
     # ------------------------------------------------------------------
+    def _write_planar_texture(self, state, output_dir: Path, written: dict) -> dict | None:
+        """Height-field meshes: write the true-ortho texture with its planar UVs (no atlas bake needed).
+
+        The UVs were assigned per grid cell before georeferencing; a
+        similarity transform of the vertices leaves them valid, so the
+        exported, georeferenced vertices pair with them directly.
+        """
+        uv = getattr(state, "mesh_uv", None)
+        texture = getattr(state, "mesh_texture", None)
+        faces = getattr(state, "mesh_faces", None)
+        pc = state.point_cloud
+        if uv is None or texture is None or faces is None or pc is None or len(uv) != len(pc.xyz):
+            return None
+        from drishti3d.export.formats import export_glb, export_obj_textured
+
+        try:
+            written.update(export_obj_textured(output_dir / "model_textured.obj", pc.xyz, faces, uv, texture))
+            export_glb(
+                output_dir / "model_textured.glb",
+                pc.xyz,
+                faces,
+                colors=pc.rgb,
+                confidence=pc.confidence,
+                uv=uv,
+                texture=texture,
+            )
+            written["glb_textured"] = output_dir / "model_textured.glb"
+        except Exception:
+            logger.warning("texture: writing the planar-textured mesh failed", exc_info=True)
+            return None
+        covered = float(np.mean(texture.reshape(-1, 3).max(axis=1) > 0)) * 100.0
+        return {
+            "method": "heightfield_true_ortho",
+            "texture_size": int(max(texture.shape[:2])),
+            "views_used": len(state.keyframes),
+            "texel_coverage_pct": round(covered, 1),
+        }
+
     def _bake_texture(self, state, output_dir: Path, written: dict) -> dict | None:
         """Bake and write ``model_textured.obj`` + ``.mtl`` + ``.png``.
 
@@ -4531,6 +6540,9 @@ class ExportStage(PipelineStage):
         frame, and the atlas is baked against the geometry actually being
         exported.
         """
+        planar = self._write_planar_texture(state, output_dir, written)
+        if planar is not None:
+            return planar
         cfg = getattr(state.config, "texture", None)
         if cfg is None or not cfg.enabled:
             return None

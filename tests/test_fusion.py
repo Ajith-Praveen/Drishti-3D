@@ -224,6 +224,12 @@ def test_tsdf_integrate_and_extract_box_mesh_bbox():
     np.testing.assert_allclose(mesh_min, box_min, atol=tolerance)
     np.testing.assert_allclose(mesh_max, box_max, atol=tolerance)
 
+    # A 2.5D height field cannot preserve both top and underside over the
+    # same XY footprint. Verify actual volumetric mesh extraction does.
+    centre = vertices[(np.abs(vertices[:, 0]) < 0.5) & (np.abs(vertices[:, 1]) < 0.5)]
+    assert np.any(centre[:, 2] > 0.8)
+    assert np.any(centre[:, 2] < -0.8)
+
 
 def test_tsdf_confidence_has_multiple_tiers():
     volume, _box_min, _box_max = _six_view_box_submap_free_integration(voxel_size=0.15, sdf_trunc=0.45)
