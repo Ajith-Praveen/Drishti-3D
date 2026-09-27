@@ -583,7 +583,9 @@ def _absolute_accuracy_m(
         bias = median_accuracy_h if median_accuracy_h is not None else _RTK_ACCURACY_THRESHOLD_M
         notes.append(
             f"telemetry reports RTK/PPK-grade GPS accuracy ({bias:.3f} m); "
-            "absolute accuracy is bounded by that, not the standalone-GPS floor."
+            "absolute accuracy is bounded by that, not the standalone-GPS floor -- provided the RTK "
+            "base / NTRIP position is itself surveyed and the video-to-log clock alignment is exact "
+            "(a residual clock offset shifts the model along the track by speed x offset)."
         )
         return max(bias, relative_accuracy_m), bias, notes
 

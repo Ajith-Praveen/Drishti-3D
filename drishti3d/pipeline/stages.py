@@ -4652,6 +4652,35 @@ def _ensure_supplied_lens(state) -> None:
         _install_lens(state, source.dist_coeffs, source=getattr(state, "intrinsics_provenance", "") or "supplied")
 
 
+def _clock_sync_sigma_s(state) -> float:
+    """1-sigma of the video<->log clock alignment: one frame when the log is
+    already on the video clock (per-frame export), else 0.1 s (a 10 Hz log's
+    recording flag or a visual lag search)."""
+    stats = getattr(state, "telemetry_stats", None) or {}
+    if stats.get("time_base") == "video":
+        fps = float(getattr(getattr(state, "video", None), "fps", 0.0) or 30.0)
+        return 1.0 / max(fps, 1.0)
+    return 0.1
+
+
+def _keyframe_velocity(keyframes: list[Keyframe], enu_by_idx: dict[int, np.ndarray]) -> dict[int, np.ndarray]:
+    """ENU velocity (m/s) per geo-tagged keyframe, from its GPS-tagged neighbours."""
+    def when(kf) -> float | None:
+        t = getattr(kf, "timestamp", None)
+        if t is None and getattr(kf, "telemetry", None) is not None:
+            t = kf.telemetry.timestamp
+        return None if t is None else float(t)
+
+    idx = sorted(enu_by_idx)
+    velocity: dict[int, np.ndarray] = {}
+    for k, i in enumerate(idx):
+        a, b = idx[max(k - 1, 0)], idx[min(k + 1, len(idx) - 1)]
+        ta, tb = when(keyframes[a]), when(keyframes[b])
+        if a != b and ta is not None and tb is not None and tb - ta > 1e-6:
+            velocity[i] = (enu_by_idx[b] - enu_by_idx[a]) / (tb - ta)
+    return velocity
+
+
 def _camera_priors_from_telemetry(keyframes: list[Keyframe], state=None) -> list:
     """Build ``bundle.CameraPrior`` entries from each keyframe's own flight telemetry.
 
@@ -4689,6 +4718,15 @@ def _camera_priors_from_telemetry(keyframes: list[Keyframe], state=None) -> list
     tilt_sigma = None if measured is None or measured <= 2.0 / 1.5 else min(5.0, float(1.5 * measured))
 
     enu_by_idx = _gps_enu_by_keyframe(keyframes)
+    # A log's own accuracy (RTK/PPK: centimetres) is for the antenna at the
+    # log's timestamp. The camera is matched to the log by clock alignment,
+    # so a residual clock error moves its fix along the track by speed x
+    # error; added in quadrature, per keyframe. Logs without an accuracy
+    # keep the configured default sigma, untouched.
+    sync_sigma_s = _clock_sync_sigma_s(state)
+    has_accuracy = any(getattr(getattr(kf, "telemetry", None), "geo", None) is not None
+                       and kf.telemetry.geo.accuracy_h is not None for kf in keyframes)
+    velocity = _keyframe_velocity(keyframes, enu_by_idx) if has_accuracy else {}
 
     priors = []
     for i, kf in enumerate(keyframes):
@@ -4696,7 +4734,14 @@ def _camera_priors_from_telemetry(keyframes: list[Keyframe], state=None) -> list
         gps_position = enu_by_idx.get(i)
         gimbal_pitch = telemetry.gimbal_pitch if telemetry is not None else None
         gimbal_roll = telemetry.gimbal_roll if telemetry is not None else None
-        accuracy_h = telemetry.geo.accuracy_h if telemetry is not None and telemetry.geo is not None else None
+        geo = telemetry.geo if telemetry is not None else None
+        accuracy_h = geo.accuracy_h if geo is not None else None
+        accuracy_v = geo.accuracy_v if geo is not None else None
+        if accuracy_h is not None and i in velocity:
+            vel = velocity[i]
+            accuracy_h = float(np.hypot(accuracy_h, np.hypot(vel[0], vel[1]) * sync_sigma_s))
+            if accuracy_v is not None:
+                accuracy_v = float(np.hypot(accuracy_v, abs(vel[2]) * sync_sigma_s))
 
         if gps_position is None and gimbal_pitch is None:
             continue
@@ -4706,6 +4751,7 @@ def _camera_priors_from_telemetry(keyframes: list[Keyframe], state=None) -> list
                 camera_idx=i,
                 gps_position=gps_position,
                 gps_sigma_m=accuracy_h,
+                gps_sigma_v_m=accuracy_v,
                 gimbal_pitch_deg=gimbal_pitch,
                 gimbal_roll_deg=gimbal_roll,
                 tilt_sigma_deg=tilt_sigma,
@@ -4920,15 +4966,16 @@ class BundleAdjustmentStage(PipelineStage):
         # A 20 m test was tried: DJI_1001 kept 6 end-of-flight cameras whose
         # images disagree with the log, one was then pulled 32.9 m off its
         # fix, and the camera gate rejected the whole solution.
-        gps_sigma = {cp.camera_idx: (cp.gps_sigma_m or ba_config.gps_sigma_m_default)
+        gps_sigma = {cp.camera_idx: bundle.gps_prior_sigmas(cp, ba_config)
                      for cp in problem.camera_priors if getattr(cp, "gps_position", None) is not None}
         max_unrefined = max(1, int(_MAX_UNREFINED_CAMERA_FRACTION * len(problem.cameras)))
         for _ in range(3):
-            vfac = float(getattr(ba_config, "gps_vertical_sigma_factor", 1.0) or 1.0)
+            # Per-axis sigmas (same as the solver's): identical to the old
+            # "scale dz by 1/vertical factor" gate when the log has no accuracy.
             outliers = {i for i, s in gps_sigma.items()
                         if i not in unrefined and i in gps
-                        and np.linalg.norm((np.asarray(result.poses[i].t, dtype=np.float64) - gps[i])
-                                           * np.array([1.0, 1.0, 1.0 / vfac])) > _CAMERA_GPS_OUTLIER_SIGMAS * s}
+                        and np.linalg.norm((np.asarray(result.poses[i].t, dtype=np.float64) - gps[i]) / s)
+                        > _CAMERA_GPS_OUTLIER_SIGMAS}
             residuals = getattr(result, "residuals_px", None)
             if residuals is not None and len(residuals) == len(problem.obs_camera_idx) and len(residuals):
                 err = np.linalg.norm(np.asarray(residuals), axis=1)

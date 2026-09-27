@@ -171,6 +171,10 @@ class CameraPrior:
         *not* an absolute-accuracy statement about the final map (see
         ``georef.py`` for that split) -- it is just how hard the optimizer
         should trust this one camera's GPS fix relative to reprojection.
+        ``gps_sigma_v_m`` is the vertical 1-sigma when the log reports one
+        (RTK/PPK); otherwise vertical = horizontal x
+        ``BAConfig.gps_vertical_sigma_factor``. Both are floored at
+        ``BAConfig.gps_sigma_min_m`` (see ``gps_prior_sigmas``).
     gimbal_pitch_deg / gimbal_roll_deg / tilt_sigma_deg:
         Gravity/level prior source (IMU or gimbal attitude report -- both
         are, physically, a measurement of the local vertical, which is
@@ -183,6 +187,7 @@ class CameraPrior:
     camera_idx: int
     gps_position: np.ndarray | None = None
     gps_sigma_m: float | None = None
+    gps_sigma_v_m: float | None = None
     gimbal_pitch_deg: float | None = None
     gimbal_roll_deg: float | None = None
     tilt_sigma_deg: float | None = None
@@ -396,6 +401,12 @@ class BAConfig:
     # isotropic prior) a block whose strips are tied by image matches is
     # tilted to fit those altitudes, moving the ground horizontally.
     gps_vertical_sigma_factor: float = 1.0
+    # Floor on a camera's GPS sigma when the log reports its own accuracy
+    # (RTK/PPK: 1-5 cm). That figure is for the antenna at the receiver's
+    # timestamp; the camera sits a lever arm away (0.1-0.3 m on small
+    # drones) and is matched to the log by clock alignment (one 60 fps frame
+    # at 10 m/s is 0.17 m), so a 2 cm prior would over-trust the fix.
+    gps_sigma_min_m: float = 0.25
     tilt_sigma_deg_default: float = 2.0
     # Residual evaluations for a LINEAR-loss warm start before a robust
     # solve (0 disables). A Huber loss scaled to ~1 px caps every residual's
@@ -547,6 +558,21 @@ class BAResult:
 # ---------------------------------------------------------------------------
 
 
+def gps_prior_sigmas(prior: CameraPrior, config: BAConfig) -> np.ndarray:
+    """(east, north, up) 1-sigma of one camera's GPS prior, in metres.
+
+    The log's own accuracy when it has one (RTK/PPK or receiver-reported),
+    floored at ``config.gps_sigma_min_m``; else ``gps_sigma_m_default``.
+    Vertical: the reported vertical accuracy when present, otherwise the
+    horizontal sigma x ``gps_vertical_sigma_factor``.
+    """
+    floor = float(config.gps_sigma_min_m)
+    h = float(config.gps_sigma_m_default) if prior.gps_sigma_m is None else max(float(prior.gps_sigma_m), floor)
+    v_rep = getattr(prior, "gps_sigma_v_m", None)
+    v = max(float(v_rep), floor) if v_rep is not None else h * float(config.gps_vertical_sigma_factor)
+    return np.array([h, h, v], dtype=np.float64)
+
+
 def _priors_fix_datum(problem: BAProblem, config: BAConfig | None = None) -> bool:
     """True when the camera priors alone pin position, scale and orientation.
 
@@ -559,9 +585,9 @@ def _priors_fix_datum(problem: BAProblem, config: BAConfig | None = None) -> boo
     gps = [p for p in problem.camera_priors if p.gps_position is not None and p.camera_idx not in fixed]
     if len(gps) < 3:
         return False
-    default_sigma = config.gps_sigma_m_default if config is not None else 5.0
+    cfg = config if config is not None else BAConfig(gps_sigma_m_default=5.0)
     pos = np.array([p.gps_position for p in gps], dtype=np.float64).reshape(-1, 3)
-    sigma = float(np.median([p.gps_sigma_m if p.gps_sigma_m is not None else default_sigma for p in gps]))
+    sigma = float(np.median([gps_prior_sigmas(p, cfg)[0] for p in gps]))
     spread = np.linalg.svd(pos - pos.mean(axis=0), compute_uv=False) / np.sqrt(len(pos))
     if not np.isfinite(spread).all() or spread[0] < 4.0 * sigma:
         return False
@@ -809,9 +835,7 @@ def _fast_constants(problem: BAProblem, layout: ParamLayout, config: BAConfig) -
         "D0": np.stack([_dist5(k) for k in problem.intrinsics]) if n else np.zeros((0, 5)),
         "gps_idx": np.array([p.camera_idx for p in gps], dtype=np.int64),
         "gps_pos": np.array([p.gps_position for p in gps], dtype=np.float64).reshape(-1, 3),
-        "gps_sigma": np.array(
-            [p.gps_sigma_m if p.gps_sigma_m is not None else config.gps_sigma_m_default for p in gps], dtype=np.float64
-        ).reshape(-1, 1) * np.array([1.0, 1.0, float(config.gps_vertical_sigma_factor)]),
+        "gps_sigma": np.array([gps_prior_sigmas(p, config) for p in gps], dtype=np.float64).reshape(-1, 3),
         "tilt_idx": np.array([p.camera_idx for p in tilt], dtype=np.int64),
         "tilt_up": np.array(
             [
@@ -1054,8 +1078,7 @@ def _residuals_reference(
 
     res_gps = np.empty(sizes["n_gps"], dtype=np.float64)
     for k, prior in enumerate(sizes["gps_priors"]):
-        s = prior.gps_sigma_m if prior.gps_sigma_m is not None else config.gps_sigma_m_default
-        s = s * np.array([1.0, 1.0, float(config.gps_vertical_sigma_factor)])
+        s = gps_prior_sigmas(prior, config)
         res_gps[3 * k : 3 * k + 3] = (t_all[prior.camera_idx] - prior.gps_position) / s
 
     res_tilt = np.empty(sizes["n_tilt"], dtype=np.float64)

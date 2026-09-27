@@ -235,6 +235,21 @@ def resample_telemetry(
     yaw_valid = np.isfinite(yaw_arr)
     yaw_arr[yaw_valid] = np.degrees(np.unwrap(np.radians(yaw_arr[yaw_valid])))
     baro_arr = _field(lambda s: s.baro_alt)
+    acc_h_arr = _field(lambda s: s.geo.accuracy_h if s.geo is not None else None)
+    acc_v_arr = _field(lambda s: s.geo.accuracy_v if s.geo is not None else None)
+
+    def _worst_neighbour(values: np.ndarray, query: float) -> float | None:
+        """Accuracy at ``query``: the sample itself on an exact hit, else the worse
+        of the two around it (an RTK fix can drop to float between two samples)."""
+        mask = np.isfinite(values)
+        if not mask.any():
+            return None
+        tv, vv = t_arr[mask], values[mask]
+        i = int(np.searchsorted(tv, query))
+        if i < len(tv) and tv[i] == query:
+            return float(vv[i])
+        near = [vv[j] for j in (i - 1, i) if 0 <= j < len(vv)]
+        return float(max(near)) if near else None
 
     results: list[TelemetrySample | None] = []
     for t in timestamps:
@@ -255,6 +270,11 @@ def resample_telemetry(
                 alt_rel_valid_mask = mask & ~np.isnan(alt_rel_arr)
                 if alt_rel_valid_mask.any():
                     geo.alt_rel = _interp_scalar(t_arr[alt_rel_valid_mask], alt_rel_arr[alt_rel_valid_mask], t)
+                # Receiver accuracy (RTK/PPK or reported) must survive
+                # resampling: keyframes carry it to the bundle adjustment's
+                # per-camera GPS weight and to georef's RTK detection.
+                geo.accuracy_h = _worst_neighbour(acc_h_arr, t)
+                geo.accuracy_v = _worst_neighbour(acc_v_arr, t)
 
         def _interp_masked(values: np.ndarray, query: float = t) -> float | None:
             mask = ~np.isnan(values)
@@ -416,7 +436,7 @@ def parse_srt_string(text: str) -> tuple[list[TelemetrySample], dict]:
 # exports a gimbal heading and pitch but not a gimbal roll).
 _ROLE_HEADER_PRIORITY: dict[str, tuple[str, ...]] = {
     "lat": ("latitude", "lat", "drone_lat"),
-    "lon": ("longitude", "long", "lon", "drone_lon"),
+    "lon": ("longitude", "long", "lon", "lng", "drone_lon"),
     "alt_msl": ("altitude_above_sealevel", "altitudeabovesealevel", "altitude", "abs_alt", "drone_altitude_m"),
     "alt_rel": ("height_above_takeoff", "relative_altitude", "altitude_above_ground", "rel_alt", "height"),
     # Video-clock columns first: a per-frame export (one row per video
@@ -451,6 +471,68 @@ _CSV_FLAG_LOOKUP = {"isvideo": "is_video", "isphoto": "is_photo"}
 # caller can eyeball GPS health without this module fabricating a
 # precision it cannot back up.
 _CSV_QUALITY_LOOKUP = {"satellites": "satellites", "gpslevel": "gpslevel"}
+
+# GPS accuracy and RTK fix columns. Unlike ``satellites``/``gpslevel`` above
+# these ARE the receiver's own accuracy estimate in metres (or a documented
+# fix state), so they feed ``GeoPoint.accuracy_h``/``accuracy_v`` -- and
+# through them the bundle adjustment's per-camera GPS weight and georef's
+# RTK/PPK detection. Matched on the normalized header (``hAcc(mm)`` ->
+# ``hacc`` with unit ``mm``); the first listed name present wins.
+_ACCURACY_H_HEADERS = ("accuracy_h", "horizontal_accuracy", "h_accuracy", "hacc", "h_acc", "gps_hacc", "gpa.hacc",
+                       "eph", "rtk_std_h")
+_ACCURACY_V_HEADERS = ("accuracy_v", "vertical_accuracy", "v_accuracy", "vacc", "v_acc", "gps_vacc", "gpa.vacc",
+                       "epv", "rtk_std_v", "rtkstdhgt", "rtk_std_hgt")
+# DJI RTK logs give per-axis standard deviations; horizontal = their radial sum.
+_ACCURACY_LATLON_HEADERS = (("rtkstdlat", "rtkstdlon"), ("rtk_std_lat", "rtk_std_lon"))
+# Fix-state columns, RTK-specific names first (for those a bare "fixed" is unambiguous).
+_RTK_FIX_HEADERS = ("rtk_fix", "rtk_status", "rtk_flag", "rtkflag", "rtk_fix_type")
+_GPS_FIX_HEADERS = ("fix_type", "gps_fix_type", "fixtype", "gps_fix", "gps_status", "gps.status")
+RTK_FIXED, RTK_FLOAT, GPS_STANDARD = "rtk_fixed", "rtk_float", "standard"
+# 1-sigma (horizontal, vertical) accuracy assumed ONLY when a log states an
+# RTK solution but carries no accuracy figure. Deliberately conservative:
+# receivers quote ~1 cm + 1 ppm for a fixed carrier-phase solution and
+# decimetres to a metre for float; ``geometry.bundle``'s camera-side floor
+# (lever arm, video<->log timing) still applies on top.
+RTK_NOMINAL_ACCURACY_M = {RTK_FIXED: (0.05, 0.10), RTK_FLOAT: (0.5, 1.0)}
+
+
+def _classify_fix(raw: object, rtk_column: bool) -> str | None:
+    """RTK state from a log cell: MAVLink / ArduPilot / PX4 fix type (5 float,
+    6 fixed), DJI RtkFlag (34 float, 50 fixed), or text. ``None`` if empty."""
+    s = str(raw).strip().lower()
+    if not s:
+        return None
+    try:
+        code = int(float(s))
+    except ValueError:
+        if "float" in s:
+            return RTK_FLOAT
+        if "fix" in s and ("rtk" in s or (rtk_column and s in ("fix", "fixed"))):
+            return RTK_FIXED
+        return GPS_STANDARD
+    if code in (6, 50):
+        return RTK_FIXED
+    if code in (5, 34):
+        return RTK_FLOAT
+    return GPS_STANDARD
+
+
+def _accuracy_metres(cell: object, unit: str | None) -> float | None:
+    """A reported accuracy cell in metres (``mm``/``cm``/feet annotations converted); ``None`` if absent or implausible."""
+    if cell is None or not str(cell).strip():
+        return None
+    try:
+        v = float(str(cell))
+    except ValueError:
+        return None
+    if unit:
+        if unit.startswith("mm") or "milli" in unit:
+            v /= 1000.0
+        elif unit.startswith("cm") or "centi" in unit:
+            v /= 100.0
+        elif any(tok in unit for tok in _FEET_UNIT_TOKENS):
+            v *= 0.3048
+    return v if np.isfinite(v) and 0.0 < v < 1000.0 else None
 
 _FEET_UNIT_TOKENS = ("feet", "ft")
 
@@ -618,6 +700,27 @@ def _parse_csv(path: Path) -> tuple[list[TelemetrySample], dict]:
         flag_header = normalized_flags["isphoto"]
         stats["recording_flag_column"] = "isPhoto"
 
+    header_by_name: dict[str, tuple[str, str | None]] = {}
+    for raw_header in reader.fieldnames:
+        name, unit = _normalize_header(raw_header)
+        header_by_name.setdefault(name, (raw_header, unit))
+    acc_h_col = next((header_by_name[n] for n in _ACCURACY_H_HEADERS if n in header_by_name), None)
+    acc_v_col = next((header_by_name[n] for n in _ACCURACY_V_HEADERS if n in header_by_name), None)
+    acc_ll_cols = next(
+        ((header_by_name[a], header_by_name[b]) for a, b in _ACCURACY_LATLON_HEADERS if a in header_by_name and b in header_by_name),
+        None,
+    )
+    fix_col: str | None = None
+    fix_is_rtk = False
+    for names, is_rtk in ((_RTK_FIX_HEADERS, True), (_GPS_FIX_HEADERS, False)):
+        hit = next((header_by_name[n][0] for n in names if n in header_by_name), None)
+        if hit is not None:
+            fix_col, fix_is_rtk = hit, is_rtk
+            break
+    fix_counts = {RTK_FIXED: 0, RTK_FLOAT: 0, GPS_STANDARD: 0}
+    n_reported = n_nominal = 0
+    acc_h_vals: list[float] = []
+
     satellites_vals: list[float] = []
     gpslevel_vals: list[float] = []
 
@@ -666,14 +769,37 @@ def _parse_csv(path: Path) -> tuple[list[TelemetrySample], dict]:
 
             geo = None
             if "lat" in values and "lon" in values:
+                acc_h = _accuracy_metres(row.get(acc_h_col[0]), acc_h_col[1]) if acc_h_col else None
+                if acc_h is None and acc_ll_cols is not None:
+                    a = _accuracy_metres(row.get(acc_ll_cols[0][0]), acc_ll_cols[0][1])
+                    b = _accuracy_metres(row.get(acc_ll_cols[1][0]), acc_ll_cols[1][1])
+                    if a is not None and b is not None:
+                        acc_h = float(np.hypot(a, b))
+                acc_v = _accuracy_metres(row.get(acc_v_col[0]), acc_v_col[1]) if acc_v_col else None
+                if acc_h is not None:
+                    n_reported += 1
+                fix = _classify_fix(row.get(fix_col) or "", fix_is_rtk) if fix_col else None
+                if fix is not None:
+                    fix_counts[fix] += 1
+                if fix in RTK_NOMINAL_ACCURACY_M:
+                    nominal_h, nominal_v = RTK_NOMINAL_ACCURACY_M[fix]
+                    if acc_h is None:
+                        acc_h = nominal_h
+                        n_nominal += 1
+                    if acc_v is None:
+                        acc_v = nominal_v
+                if acc_h is not None:
+                    acc_h_vals.append(acc_h)
                 geo = GeoPoint(
                     lat=values["lat"],
                     lon=values["lon"],
                     alt_msl=values.get("alt_msl", 0.0),
                     alt_rel=values.get("alt_rel"),
-                    # accuracy_h/accuracy_v deliberately left None -- see
-                    # _CSV_QUALITY_LOOKUP's docstring on why satellites/
-                    # gpslevel are not converted into a metres figure here.
+                    # Only a receiver-reported accuracy or a stated RTK fix
+                    # sets these; satellites / gpslevel never do (see
+                    # _CSV_QUALITY_LOOKUP).
+                    accuracy_h=acc_h,
+                    accuracy_v=acc_v,
                 )
 
             samples.append(
@@ -696,6 +822,14 @@ def _parse_csv(path: Path) -> tuple[list[TelemetrySample], dict]:
         stats["satellites_median"] = float(np.median(satellites_vals))
     if gpslevel_vals:
         stats["gpslevel_median"] = float(np.median(gpslevel_vals))
+    if fix_col is not None:
+        stats["gps_fix_column"] = fix_col
+        stats["gps_fix_counts"] = fix_counts
+    if acc_h_vals:
+        stats["gps_accuracy_h_median_m"] = float(np.median(acc_h_vals))
+        stats["gps_accuracy_source"] = (
+            "reported" if n_nominal == 0 else "rtk_fix_nominal" if n_reported == 0 else "reported+rtk_fix_nominal"
+        )
 
     return samples, stats
 
