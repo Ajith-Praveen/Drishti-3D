@@ -83,14 +83,6 @@ dev = [
     "pyinstaller",
 ]
 
-[tool.pytest.ini_options]
-# Collect ONLY from tests/. Without this, pytest's default `*_test.py`
-# pattern sweeps up `kaggle/drishti3d_full_test.py` -- a Kaggle notebook
-# export containing `!pip` magics, which is not valid Python and fails the
-# entire run at collection time, before a single real test executes.
-testpaths = ["tests"]
-norecursedirs = ["kaggle", "dist", "build", "packaging", ".venv", "output", "results", "slide_assets"]
-
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

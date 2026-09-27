@@ -3,8 +3,6 @@
 Desktop app that turns a single-pass drone video into a georeferenced 3D model.
 Smart India Hackathon 2026, problem statement SIH26158 (NTRO).
 
-![Fly-over of the reconstructed DJI_1001 town](docs/images/flyover.gif)
-
 ## Results at a glance
 
 | | Measured on real flights |
@@ -14,13 +12,6 @@ Smart India Hackathon 2026, problem statement SIH26158 (NTRO).
 | **Model** | true 3D mesh from per-camera stereo: DJI_1001 **8.0 M vertices, 84 % directly measured**, confidence per point; unseen areas are not invented |
 | **Outputs** | OBJ, PLY, LAS, GeoTIFF (DSM, DTM, orthomosaic, confidence), glTF/GLB, FBX, textured OBJ/GLB, HTML/TXT report, cameras.json |
 | **Viewer** | desktop app with live preview, heatmaps, and point / distance / area / volume / profile tools exporting GeoJSON and KML |
-
-![Before: 2.5D height map. After: measured 3D](docs/images/before_after_dji.jpg)
-
-![Volume and elevation profile measured on the model](docs/images/measure_tools.jpg)
-
-A 60-second demo is rendered from these reconstructions (script and timings:
-[docs/demo/SCRIPT.md](docs/demo/SCRIPT.md)).
 
 Limits, stated plainly: absolute accuracy has not been checked against RTK
 checkpoints (none were available); on flight01, strips flown in opposite
@@ -135,15 +126,28 @@ backbone with full-3D fusion; `heightfield` reports an error when the flight is 
   - an explicit one is kept, but a disagreement over `ingest.auto_sync_warn_s`
     is reported on the report card;
   - `ingest.auto_sync: correct` applies the measurement anyway, and `off` skips it.
+- RTK / PPK GPS (the problem statement's optional corrections input) is read from
+  CSV logs:
+  - accuracy columns in metres (`hAcc`/`vAcc`, `eph`/`epv`,
+    `horizontal_accuracy`, DJI `RtkStdLat`/`RtkStdLon`/`RtkStdHgt`; `(mm)` and
+    `(cm)` units converted);
+  - or a fix state (`fix_type`/`gps_status` 6 = RTK fixed, 5 = float; DJI
+    `RtkFlag` 50/34; `rtk_status` text). A fix state with no accuracy counts as
+    5 cm fixed / 50 cm float.
 
-## Scoring against surveyed points
+  Each camera's GPS weight then follows the log's accuracy plus the video-to-log
+  timing error (speed × clock uncertainty), never below 0.25 m for the
+  camera-to-antenna offset. The report claims centimetre-level absolute accuracy
+  only when the log itself reports RTK-grade accuracy. Logs without these columns
+  behave exactly as before (2.5 m prior).
 
-```bash
-.venv/bin/python scripts/score_flight01.py RUN/output --clip-start 120.46 --subset nadir
-```
+## Benchmark
 
-For flight01, runs need `--telemetry-offset 121.66`. The clip's frame 0 is mkv
-PTS 120.464 s, and the log runs 1.2 s ahead of the mkv clock.
+The flight01 accuracy numbers above come from the PinPoint validation dataset
+([doi:10.5281/zenodo.22671839](https://doi.org/10.5281/zenodo.22671839)); the
+method and full results are in [evidence/flight01-benchmark.md](evidence/flight01-benchmark.md).
+flight01 runs need `--telemetry-offset 121.66`: the clip's frame 0 is mkv PTS
+120.464 s, and the log runs 1.2 s ahead of the mkv clock.
 
 ## Setup
 
@@ -157,15 +161,12 @@ uv sync --extra ml    # torch / torchvision (CUDA or MPS acceleration)
 uv sync --extra semantics  # SegFormer semantic classification + dynamic-object masking
 uv sync --extra texture    # xatlas UV unwrapping for the photographic texture atlas
 uv sync --extra reference  # rasterio, for reference-orthophoto/DEM alignment
-
-# Run tests
-uv run pytest
 ```
 
 The `ml` extra also installs the pinned MapAnything implementation. Its weights
 are downloaded on first use, or loaded from `DRISHTI3D_MAPANYTHING_WEIGHTS` for
 offline runs. A missing reconstruction model now fails the geometry stage;
-`--backbone null` is explicitly synthetic and is only for tests/demos.
+`--backbone null` is explicitly synthetic and is only for demos.
 It also installs kornia for the default DISK + LightGlue feature matching
 (weights downloaded once on first use); without kornia, matching logs a
 warning and falls back to SIFT.
@@ -225,9 +226,8 @@ Apple MPS, then CPU). Builds:
   `docker build -f packaging/Dockerfile -t drishti3d .`, then
   `docker run --rm --gpus all -v "$PWD/data:/data" drishti3d run /data/flight.mp4 --telemetry /data/flight.csv --out /data/out`
   (the desktop app over X11: see the Dockerfile header).
-- **CI**: `.github/workflows/build.yml` tests on all three systems and uploads
-  the Windows, Linux and macOS builds (run it from the Actions tab or with a
-  `v*` tag).
+- **CI**: `.github/workflows/build.yml` builds the Windows, Linux and macOS
+  apps and the Docker image (run it from the Actions tab or with a `v*` tag).
 
 Open3D ships Linux wheels for x86_64 only, so Linux ARM is not supported.
 
