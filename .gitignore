@@ -31,9 +31,9 @@ htmlcov/
 
 # Project data / model / output directories (pitch slides, voice scripts and
 # slide sources under output/ are kept; renders and videos are not)
-data/
-models/
-results/
+/data/
+/models/
+/results/
 output/*
 !output/slides/
 !output/demo/

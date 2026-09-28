@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "checkpoint": "facebook/map-anything-apache",
+  "revision": "00f9c245bbcb60522d1ed7f9e9d88462c6e3f38a",
+  "license": "Apache-2.0",
+  "supported_runtime": {
+    "platform_id": "macos-arm64",
+    "system": "Darwin",
+    "machine": "arm64",
+    "python": "3.12",
+    "backend": "mps",
+    "packages": {
+      "torch": "2.14.0",
+      "torchvision": "0.29.0",
+      "mapanything": "1.1.4",
+      "uniception": "0.1.7",
+      "safetensors": "0.8.0"
+    }
+  },
+  "files": {
+    "config.json": {
+      "size": 5776,
+      "sha256": "65701d09d99ed37a21d295f0d138978b3d584ab3bccdbcb4a2853da212b676c5"
+    },
+    "model.safetensors": {
+      "size": 4914062480,
+      "sha256": "fa06c0fdccefc5048e072c85935d5789b1e36b307f3859033c17f9dcb9fd5201"
+    }
+  }
+}

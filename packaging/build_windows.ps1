@@ -1,12 +1,13 @@
 # Build DRISHTI-3D for Windows (x64), with NVIDIA CUDA acceleration.
 #
 #   powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1
-#   powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1 -Cuda cu128
+#   powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1 -Cuda cu130
 #   powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1 -CpuOnly
 #
 # Produces dist\DRISHTI-3D\DRISHTI-3D.exe and dist\DRISHTI-3D-windows-x64.zip.
 # Needs: uv (https://docs.astral.sh/uv/), git, and for CUDA an NVIDIA driver
-# new enough for the chosen CUDA build (cu128: driver >= 570).
+# new enough for the chosen CUDA build (cu126: driver >= 560; cu130: >= 580).
+# PyTorch publishes torch 2.14.0 for Windows as cu126, cu130 and cu132 only.
 #
 # PyPI's Windows torch wheels are CPU-only, so after the locked environment
 # is synced the same torch/torchvision versions are reinstalled from
@@ -14,7 +15,7 @@
 # still runs (device selection falls back to CPU).
 
 param(
-    [string]$Cuda = "cu128",
+    [string]$Cuda = "cu126",
     [switch]$CpuOnly
 )
 

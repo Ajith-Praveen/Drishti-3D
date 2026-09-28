@@ -309,8 +309,8 @@ The pipeline picks CUDA automatically when an NVIDIA GPU is present (then
 Apple MPS, then CPU). Builds:
 
 - **Windows 10/11 x64**: `powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1`
-  (installs the CUDA build of the locked torch from PyTorch's index; `-Cuda cu126`
-  for older drivers, `-CpuOnly` without a GPU) -> `dist\DRISHTI-3D\DRISHTI-3D.exe`.
+  (installs the CUDA 12.6 build of the locked torch from PyTorch's index; `-Cuda cu130`
+  for newer drivers, `-CpuOnly` without a GPU) -> `dist\DRISHTI-3D\DRISHTI-3D.exe`.
 - **Linux x86_64** (Ubuntu 22.04+): `./packaging/build_linux.sh` -> `dist/DRISHTI-3D/`
   with a `.desktop` entry. PyPI's Linux torch already carries CUDA.
 - **Docker, Linux + NVIDIA** (NVIDIA Container Toolkit):
