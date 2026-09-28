@@ -46,6 +46,8 @@ viewer that silently drops 80% of the data would be lying.
 
 from __future__ import annotations
 
+import sys
+
 import numpy as np
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import QVBoxLayout, QWidget
@@ -122,8 +124,23 @@ class _RenderOnDemandQVTK(QVTKRenderWindowInteractor):
     exposed native surface.
     """
 
+    _repaint_pending = False
+
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
         event.accept()
+        # Without a compositor (X11: Linux desktops, remote/VNC sessions) an
+        # exposed native window keeps nothing -- a closed dialog's pixels stay
+        # on the 3D view -- so redraw it once this paint event has returned.
+        if sys.platform != "darwin" and not self._repaint_pending:
+            if getattr(self.parent(), "_started", False):
+                self._repaint_pending = True
+                QTimer.singleShot(0, self._redraw_after_expose)
+
+    def _redraw_after_expose(self) -> None:
+        self._repaint_pending = False
+        owner = self.parent()
+        if getattr(owner, "_started", False):
+            owner._render()
 
 
 # ---------------------------------------------------------------------------
@@ -404,6 +421,8 @@ class Viewport(QWidget):
         self._path_marker_actor: vtkActor | None = None
         self._camera_actor: vtkActor | None = None
         self._camera_count = 0
+        self._camera_scale = 5.0
+        self._highlight_actor: vtkActor | None = None
 
         self._scalar_bar: vtkScalarBarActor | None = None
         self._grid_actor: vtkActor | None = None
@@ -794,6 +813,7 @@ class Viewport(QWidget):
             else:
                 scale = 5.0
             scale = float(np.clip(scale, 0.5, 60.0))
+        self._camera_scale = float(scale)
 
         # Frustum corners in the camera frame (OpenCV: X right, Y down,
         # Z forward), at depth ``scale``.
@@ -876,6 +896,7 @@ class Viewport(QWidget):
         self._render()
 
     def clear_cameras(self) -> None:
+        self.clear_camera_highlight()
         if self._camera_actor is not None:
             self.renderer.RemoveActor(self._camera_actor)
         self._camera_actor = None
@@ -893,6 +914,88 @@ class Viewport(QWidget):
 
     def has_cameras(self) -> bool:
         return self._camera_actor is not None
+
+    def highlight_camera(self, pose, intrinsics=None) -> None:
+        """Draw one camera large and bright: the one whose frame the video pane shows."""
+        self.clear_camera_highlight(render=False)
+        if pose is None:
+            self._render()
+            return
+        scale = self._camera_scale * 1.8
+        if intrinsics is not None:
+            half_w = scale * (intrinsics.width / 2.0) / float(intrinsics.fx)
+            half_h = scale * (intrinsics.height / 2.0) / float(intrinsics.fy)
+        else:
+            half_w = scale * 0.577
+            half_h = half_w * 0.75
+        local = np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [-half_w, -half_h, scale],
+                [half_w, -half_h, scale],
+                [half_w, half_h, scale],
+                [-half_w, half_h, scale],
+                [0.0, -half_h * 1.35, scale],  # "up" tick: which image edge is the top
+            ]
+        )
+        R = np.asarray(pose.R, dtype=np.float64).reshape(3, 3)
+        centre = np.asarray(pose.t, dtype=np.float64).reshape(3)
+        world = local @ R.T + centre
+        segments = [(1, 2), (2, 3), (3, 4), (4, 1), (0, 1), (0, 2), (0, 3), (0, 4), (1, 5), (5, 2)]
+        cells = vtkCellArray()
+        for a, b in segments:
+            cells.InsertNextCell(2)
+            cells.InsertCellPoint(a)
+            cells.InsertCellPoint(b)
+        polydata = vtkPolyData()
+        polydata.SetPoints(_vtk_points(world))
+        polydata.SetLines(cells)
+        mapper = vtkPolyDataMapper()
+        mapper.SetInputData(polydata)
+        actor = vtkActor()
+        actor.SetMapper(mapper)
+        prop = actor.GetProperty()
+        prop.SetColor(*theme.rgb_f(theme.ACCENT_BRIGHT))
+        prop.SetLineWidth(3.0)
+        prop.SetLighting(False)
+        self.renderer.AddActor(actor)
+        self._highlight_actor = actor
+        self._render()
+
+    def clear_camera_highlight(self, render: bool = True) -> None:
+        if self._highlight_actor is not None:
+            self.renderer.RemoveActor(self._highlight_actor)
+            self._highlight_actor = None
+            if render:
+                self._render()
+
+    def look_through(self, pose, intrinsics=None) -> None:
+        """Put the 3D view at a camera, looking where it looked, with its field of view."""
+        if pose is None:
+            return
+        R = np.asarray(pose.R, dtype=np.float64).reshape(3, 3)
+        centre = np.asarray(pose.t, dtype=np.float64).reshape(3)
+        forward, up = R[:, 2], -R[:, 1]
+        bounds = self.renderer.ComputeVisiblePropBounds()
+        ground = 0.5 * (bounds[4] + bounds[5]) if bounds[0] <= bounds[1] else centre[2] - 100.0
+        distance = max(10.0, abs(centre[2] - ground) / max(0.2, abs(forward[2])))
+        camera = self.renderer.GetActiveCamera()
+        camera.SetPosition(*centre)
+        camera.SetFocalPoint(*(centre + forward * distance))
+        camera.SetViewUp(*up)
+        if intrinsics is not None:
+            # Fit the whole frame: a view narrower than the image matches its
+            # horizontal field of view, a wider one its vertical.
+            view_w, view_h = self.vtk_widget.GetRenderWindow().GetSize()
+            image_aspect = intrinsics.width / float(intrinsics.height)
+            if view_h and view_w / float(view_h) < image_aspect:
+                camera.UseHorizontalViewAngleOn()
+                camera.SetViewAngle(float(np.degrees(2.0 * np.arctan(intrinsics.width / 2.0 / float(intrinsics.fx)))))
+            else:
+                camera.UseHorizontalViewAngleOff()
+                camera.SetViewAngle(float(np.degrees(2.0 * np.arctan(intrinsics.height / 2.0 / float(intrinsics.fy)))))
+        self.renderer.ResetCameraClippingRange()
+        self._render()
 
     # ------------------------------------------------------------------
     # Whole-scene
@@ -1102,6 +1205,9 @@ class Viewport(QWidget):
         default framing pushed a 650 m site into the middle sixth of the
         window.
         """
+        # Undo a "look through this camera" field of view (VTK's default is 30 deg).
+        self.renderer.GetActiveCamera().UseHorizontalViewAngleOff()
+        self.renderer.GetActiveCamera().SetViewAngle(30.0)
         bounds = self.scene_bounds()
         if bounds is None:
             self.renderer.ResetCamera()

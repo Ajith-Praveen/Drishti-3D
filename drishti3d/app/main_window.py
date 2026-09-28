@@ -70,6 +70,7 @@ from drishti3d.app.panels.report_panel import ReportPanel
 from drishti3d.app.panels.settings_panel import SettingsPanel
 from drishti3d.app.panels.stage_rail import STAGE_SPECS, StageRail
 from drishti3d.app.panels.topbar import TopBar
+from drishti3d.app.panels.video_sync import VideoSyncPanel
 from drishti3d.app.panels.viewer import Viewer
 from drishti3d.app.viewport import COLOR_MODES, Viewport
 from drishti3d.app.workers import STAGES, DemoPipeline, PipelineWorker, RealPipeline
@@ -157,8 +158,22 @@ class MainWindow(QMainWindow):
         self.viewer = Viewer(self.viewport)
         self.diagnostics = DiagnosticsPanel()
 
+        # Raw video beside the model: hidden until View > Video Beside Model.
+        self.video_panel = VideoSyncPanel()
+        self._video_frame = self._framed(self.video_panel, theme.BG_PANEL)
+        self._video_frame.hide()
+        beside = QSplitter(Qt.Horizontal)
+        beside.addWidget(self._video_frame)
+        beside.addWidget(self._framed(self.viewer, None))
+        beside.setStretchFactor(0, 1)
+        beside.setStretchFactor(1, 1)
+        beside.setCollapsible(1, False)
+        self._beside_splitter = beside
+        self.video_panel.cameraSelected.connect(self._on_video_camera)
+        self.video_panel.lookThroughChanged.connect(self._on_video_look_through)
+
         centre = QSplitter(Qt.Vertical)
-        centre.addWidget(self._framed(self.viewer, None))
+        centre.addWidget(beside)
         centre.addWidget(self._framed(self.diagnostics, None))
         centre.setStretchFactor(0, 4)
         centre.setStretchFactor(1, 2)
@@ -282,6 +297,8 @@ class MainWindow(QMainWindow):
         view_menu.addSeparator()
         self._add_action(view_menu, "Toggle Diagnostics Drawer", self._toggle_diagnostics, "Ctrl+`")
         self._add_action(view_menu, "Toggle Inspector", self._toggle_inspector, "Ctrl+I")
+        self.video_action = self._add_action(view_menu, "&Video Beside Model", self._toggle_video, "Ctrl+Shift+V")
+        self.video_action.setCheckable(True)
 
         # --- Tools --------------------------------------------------------------
         tools_menu = menu_bar.addMenu("&Tools")
@@ -514,12 +531,35 @@ class MainWindow(QMainWindow):
         self.diagnostics.append_log("demo run started (synthetic; no video, no GPU)")
         self._start_pipeline(DemoPipeline())
 
+    def _toggle_video(self, checked: bool | None = None) -> None:
+        visible = bool(checked) if checked is not None else not self._video_frame.isVisible()
+        self._video_frame.setVisible(visible)
+        self.video_action.setChecked(visible)
+        if visible:
+            width = max(600, self._beside_splitter.width())
+            self._beside_splitter.setSizes([width * 2 // 5, width - width * 2 // 5])
+            self.video_panel.refresh()
+        else:
+            self.viewport.clear_camera_highlight()
+
+    def _on_video_camera(self, pose, intrinsics) -> None:
+        if not self._video_frame.isVisible():
+            return
+        self.viewport.highlight_camera(pose, intrinsics)
+        if self.video_panel.look_through.isChecked():
+            self.viewport.look_through(pose, intrinsics)
+
+    def _on_video_look_through(self, checked: bool) -> None:
+        if not checked:
+            self.viewport.reset_camera()
+
     def _reset_for_run(self) -> None:
         self.stage_rail.reset()
         self.stage_rail.set_summary("Starting…", "accent")
         self.diagnostics.reset()
         self.progress_line.set_fraction(0.0)
         self.viewport.clear_scene()
+        self.video_panel.clear()
         self.report_panel.set_report({})
         self.layers_panel.sync_from_viewport(self.viewport)
         self._completed_weight = 0.0
@@ -734,6 +774,7 @@ class MainWindow(QMainWindow):
                 (kf.intrinsics for kf in (result.keyframes or []) if kf.intrinsics is not None), None
             )
             self.viewport.set_cameras(result.poses, intrinsics=intrinsics)
+            self.video_panel.set_run(result.video_path, result.keyframes, result.poses)
 
         if result.point_cloud is not None:
             self.viewport.set_point_cloud(result.point_cloud, reset_camera=True)

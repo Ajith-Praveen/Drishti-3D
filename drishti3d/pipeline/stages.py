@@ -1634,7 +1634,8 @@ def _match_cfg(state, name: str, fallback):
     if cfg is None or not hasattr(cfg, name):
         return fallback
     value = getattr(cfg, name)
-    return fallback if value is None and name not in ("max_points_in_ba",) else value
+    # None means "off" for these fields (MatchingConfig documents it), not "use the default".
+    return fallback if value is None and name not in ("max_points_in_ba", "gravity_check_deg") else value
 
 
 def _plane_sweep_device() -> str:
@@ -2437,8 +2438,16 @@ class PosePriorStage(PipelineStage):
             )
         except Exception:
             logger.warning("focal from flow: measurement failed; keeping the intrinsics prior", exc_info=True)
-            return
+            estimate = None
         if estimate is None:
+            # Nothing measured it (no height above ground in the log, too few
+            # usable pairs): the focal is a field-of-view guess, and heights scale with it.
+            state.focal_warning = (
+                f"focal length not measured: the video and log gave no usable measurement, so the "
+                f"{base.fx:.0f} px field-of-view guess was used. Horizontal positions do not depend on it on "
+                "a downward view, but depths and heights do -- supply the camera calibration (--fx/--hfov and "
+                "--dist, or Settings > Camera) before trusting heights."
+            )
             return
 
         factor = estimate.fx / float(base.fx)
@@ -2452,6 +2461,12 @@ class PosePriorStage(PipelineStage):
                 _MIN_FOCAL_REFINE_FACTOR,
                 _MAX_FOCAL_REFINE_FACTOR,
             )
+            state.focal_warning = (
+                f"focal length not measured: image flow gave {estimate.fx:.0f} px, too far from the "
+                f"{base.fx:.0f} px field-of-view guess to trust, so the guess was kept. Depths and heights "
+                "scale with the focal length -- supply the camera calibration (--fx/--hfov and --dist, or "
+                "Settings > Camera) before trusting heights."
+            )
             return
         if estimate.spread_fraction > _MAX_FOCAL_SPREAD_FRACTION:
             logger.warning(
@@ -2460,6 +2475,12 @@ class PosePriorStage(PipelineStage):
                 "flight -- keeping the prior.",
                 estimate.fx,
                 100.0 * estimate.spread_fraction,
+            )
+            state.focal_warning = (
+                f"focal length not measured: image flow gave {estimate.fx:.0f} px but its pair-to-pair spread "
+                f"({100.0 * estimate.spread_fraction:.0f}%) was too large to trust, so the {base.fx:.0f} px "
+                "field-of-view guess was kept. Depths and heights scale with the focal length -- supply the "
+                "camera calibration (--fx/--hfov and --dist, or Settings > Camera) before trusting heights."
             )
             return
 
@@ -4481,7 +4502,10 @@ def _undistort_pixels(uv: np.ndarray, intr: CameraIntrinsics, dist: np.ndarray) 
     K = intr.K()
     pts = np.asarray(uv, dtype=np.float64).reshape(-1, 1, 2)
     criteria = (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 100, 1e-12)
-    return cv2.undistortPointsIter(pts, K, dist, None, K, criteria).reshape(-1, 2)
+    if hasattr(cv2, "undistortPointsIter"):  # OpenCV 4.x
+        return cv2.undistortPointsIter(pts, K, dist, None, K, criteria).reshape(-1, 2)
+    # OpenCV 5 folded the iterative solver into undistortPoints.
+    return cv2.undistortPoints(pts, K, dist, R=None, P=K, criteria=criteria).reshape(-1, 2)
 
 
 def _undistort_tracks(tracks, intrinsics_list, dist: np.ndarray) -> int:
@@ -6090,6 +6114,10 @@ def _apply_georeferencing(state: PipelineState) -> dict:
         )
         logger.warning("GEOREFERENCE SCALE WARNING: %s", warning)
         result.notes.append(f"WARNING: {warning}")
+
+    focal_warning = getattr(state, "focal_warning", None)
+    if focal_warning and getattr(state, "intrinsics_provenance", "") in ("default_guess", "bundle_adjusted"):
+        result.notes.append(f"WARNING: {focal_warning}")
 
     return {
         "relative_rmse_m": result.relative_accuracy_m,

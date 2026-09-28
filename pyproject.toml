@@ -7,7 +7,9 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "numpy",
     "scipy",
-    "opencv-python",
+    # Headless: a Qt app must not load a second Qt from OpenCV, and one cv2 package keeps
+    # every OS on the same (tested) OpenCV 4 -- mapanything already pulls in the headless wheel.
+    "opencv-python-headless>=4.10,<5",
     "av",
     "pyproj",
     "laspy",

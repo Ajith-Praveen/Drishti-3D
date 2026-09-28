@@ -185,6 +185,16 @@ class SettingsPanel(QWidget):
         self.dist_note.hide()
         form.addRow("", self.dist_note)
 
+        self.matching_combo = QComboBox()
+        self.matching_combo.addItem("DISK + LightGlue (default)", "disk")
+        self.matching_combo.addItem("SIFT (720p or lower)", "sift")
+        self.matching_combo.setToolTip(
+            "How keyframes are tied together. DISK + LightGlue detects on a half-size image,\n"
+            "which suits 1080p and 4K. For 720p video SIFT at full resolution poses the\n"
+            "cameras far better (PinPoint flight01: orthomosaic 1.9 m vs 8.8 m from the national map)."
+        )
+        form.addRow("Feature matching:", self.matching_combo)
+
         self.ref_ortho_edit = QLineEdit()
         self.ref_ortho_edit.setPlaceholderText("off -- GeoTIFF orthophoto for absolute alignment")
         self.ref_ortho_edit.setToolTip(
@@ -328,6 +338,7 @@ class SettingsPanel(QWidget):
         self.focal_spin.valueChanged.connect(self.settingsChanged)
         self.focal_spin.valueChanged.connect(self._validate_distortion)
         self.dist_edit.textChanged.connect(self._validate_distortion)
+        self.matching_combo.currentIndexChanged.connect(self.settingsChanged)
         self.dist_edit.textChanged.connect(self.settingsChanged)
         self._update_mesh_note()
 
@@ -508,6 +519,7 @@ class SettingsPanel(QWidget):
         dem = self.ref_dem_edit.text().strip()
         config.reference = replace(config.reference, ortho_path=ortho or None, dem_path=dem or None)
         config.ingest = replace(config.ingest, camera_fx=self.camera_fx, camera_dist_coeffs=self.dist_coeffs)
+        config.matching = replace(config.matching, method=self.matching_combo.currentData())
         return config
 
     def apply_config(self, config: Config) -> None:
@@ -531,6 +543,9 @@ class SettingsPanel(QWidget):
 
         if config.quality_profile in _PROFILES:
             self.profile_combo.setCurrentText(config.quality_profile)
+        match_index = self.matching_combo.findData(getattr(config.matching, "method", "disk"))
+        if match_index >= 0:
+            self.matching_combo.setCurrentIndex(match_index)
 
         faces = int(getattr(config.fusion, "max_mesh_faces", 0) or 0)
         if faces:
