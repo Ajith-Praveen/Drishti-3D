@@ -16,9 +16,10 @@ Smart India Hackathon 2026, problem statement SIH26158 (NTRO).
 **https://13-234-83-238.sslip.io/**
 
 The link opens the real DRISHTI-3D desktop app full-screen in the browser. Click
-**Drone video** and pick `DJI_1001_3min.mp4` (or `DJI_1001-1080p.mp4` for the full
-flight), click **Telemetry** and pick the matching `.csv`, then press **Run**. The 3D
-model builds live in the viewer; the measurement tools are under **Tools**.
+**Drone video** and pick `DJI_1001_3min.mp4` (the first 3 minutes of the DJI_1001
+flight), click **Telemetry** and pick `DJI_1001_3min.csv`, then press **Run**. The 3D
+model builds live in the viewer; the measurement tools are under **Tools**, and
+**File > Open Run** opens a finished run instantly.
 
 - **Slower than on a laptop GPU.** The prototype is deployed on an AWS server with
   only 2 CPU cores and no GPU (EC2 `m7i-flex.large`), so a run takes longer than on
@@ -27,9 +28,10 @@ model builds live in the viewer; the measurement tools are under **Tools**.
   | Sample | AWS prototype (2 CPU cores, no GPU) | MacBook (Apple-silicon GPU) |
   |---|---|---|
   | `DJI_1001_3min` (3-min clip) | 5.6 min | 1.8 min |
-  | `DJI_1001-1080p` (full 11.4-min flight) | 29.8 min | 6.3 min |
+  | `DJI_1001-1080p` (full 11.4-min flight, not on the prototype) | 29.8 min | 6.3 min |
 
-  Start with the 3-minute clip to see a complete run quickly.
+  The prototype carries only the 3-minute clip, so a judge sees a complete run in
+  about six minutes.
 - **One judge at a time.** The AWS deployment serves a single shared app session:
   everyone who opens the link sees and controls the same screen. Please run one
   reconstruction at a time and wait for it to finish before the next judge starts.

@@ -16,7 +16,7 @@ Elastic IP 13.234.83.238).
 | Display | Xvfb 1600x900 + openbox (main window maximized, no decorations); VTK draws with Mesa |
 | Browser | x11vnc (localhost only) -> websockify/noVNC -> nginx on 80/443, Let's Encrypt certificate for the sslip.io name |
 | App | `/opt/drishti3d` (read-only), runs as the unprivileged `judge` user; systemd restarts it if closed |
-| Samples | `/home/judge/DRISHTI-3D`: `DJI_1001-1080p.mp4` + `DJI_1001.csv` (full 11.4 min) and `DJI_1001_3min.mp4` + `DJI_1001_3min.csv`; root-owned in a sticky folder, so runs can be written but samples not deleted |
+| Samples | `/home/judge/DRISHTI-3D`: `DJI_1001_3min.mp4` + `DJI_1001_3min.csv` only (the first 3 minutes of DJI_1001; the full 11.4-min flight takes ~30 min here); root-owned in a sticky folder, so runs can be written but samples not deleted |
 | Outputs | `/home/judge/DRISHTI-3D/output/run_*`; an hourly job keeps the newest 3 and the disk under 80% |
 
 Measured on this instance (2 CPU cores, no GPU), so slower than on the Apple-silicon

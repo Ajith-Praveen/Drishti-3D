@@ -2,8 +2,8 @@
 # Create the judge demo server on AWS (free-plan eligible m7i-flex.large, Mumbai) and provision it.
 # Needs a configured AWS CLI. Run from the project root:
 #   ./packaging/aws/deploy.sh
-# Prints the public link. Samples are taken from the project root (DJI_1001-1080p.mp4 + DJI_1001.csv)
-# plus a 3-minute cut made here.
+# Prints the public link. The only sample is a 3-minute cut of DJI_1001 (made here from the
+# project root's DJI_1001-1080p.mp4 + DJI_1001.csv): the full flight takes ~30 min on this instance.
 set -euo pipefail
 REGION="${AWS_REGION:-ap-south-1}"; export AWS_DEFAULT_REGION="$REGION"
 NAME=drishti3d-demo
@@ -12,7 +12,6 @@ WORK="$(mktemp -d)"
 
 echo "==> samples + source bundle"
 mkdir -p "$WORK/samples"
-cp DJI_1001-1080p.mp4 DJI_1001.csv "$WORK/samples/"
 ffmpeg -y -loglevel error -i DJI_1001-1080p.mp4 -t 180 -map 0:v:0 -c copy "$WORK/samples/DJI_1001_3min.mp4"
 python3 - "$WORK/samples" <<'PY'
 import csv, sys
