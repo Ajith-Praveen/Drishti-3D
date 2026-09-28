@@ -77,4 +77,4 @@ Local regression checks for the build validator:
 .venv/bin/python -m unittest discover -s packaging -p test_smoke_test.py
 ```
 
-The repository contains application source, bundled UI assets, dependencies, configuration, and build infrastructure. Captured flights, generated output, presentation material, local experiments, and deployment-demo scripts are excluded.
+The repository contains application source, bundled UI assets, dependencies, configuration, build infrastructure, and Markdown evidence in `evidence/`. Captured flights, generated output, evidence images and HTML/text reports, presentation material, local experiments, and deployment-demo scripts are excluded.

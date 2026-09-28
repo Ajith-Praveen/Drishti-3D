@@ -34,7 +34,9 @@ htmlcov/
 /models/
 /results/
 /output/
-/evidence/
+/evidence/**
+!/evidence/**/
+!/evidence/**/*.md
 /slide_assets/
 /branding/
 /SLIDES_CONTENT.md
