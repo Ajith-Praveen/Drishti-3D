@@ -12,8 +12,8 @@ from arch import ORANGE, tile  # noqa: E402
 import slide3_v4 as V4  # noqa: E402   rect(), tag()
 from PySide6.QtGui import QFont, QFontMetricsF  # noqa: E402
 
-GITHUB_URL = None          # e.g. "github.com/<org>/drishti3d"
-AWS_URL = None             # e.g. "drishti3d.<region>.amazonaws.com"
+GITHUB_URL = "github.com/Ajith-Praveen/Drishti-3D"
+AWS_URL = "13-234-83-238.sslip.io"
 DEMO_URL = None            # e.g. a YouTube / Drive link to the 3-min demo video
 PAPER_URLS = {             # verified: Crossref (DOIs) and the arXiv API
     "Plane sweep": "https://doi.org/10.1109/CVPR.1996.517097",
@@ -28,7 +28,7 @@ PAPER_URLS = {             # verified: Crossref (DOIs) and the arXiv API
     "LightGlue": "https://arxiv.org/abs/2306.13643",
     "MapAnything": "https://arxiv.org/abs/2509.13414",
 }
-DATA_URLS = {"PinPoint flight01": "https://doi.org/10.5281/zenodo.22671839", "IGN PNOA ortho + DEM": "https://pnoa.ign.es/"}
+DATA_URLS = {"PinPoint flight01 + 02": "https://doi.org/10.5281/zenodo.22671839", "IGN ortho + LiDAR DTM": "https://pnoa.ign.es/"}
 NATIVE_LINKS = False       # True: linked titles are left out of the image and recorded in LINK_TEXTS for the .pptx
 LINK_TEXTS = []            # (x, y, w, h) in inches, text, bold, "RRGGBB", "ctr" | "l", url
 
@@ -39,8 +39,9 @@ def full_url(u):
 
 def evidence_urls():
     repo = full_url(GITHUB_URL)
-    return {"flight01 benchmark report": repo and repo.rstrip("/") + "/blob/main/evidence/flight01-benchmark.md",
-            "739 automated tests": repo and repo.rstrip("/") + "/tree/main/tests",
+    doc = repo and repo.rstrip("/") + "/blob/main/evidence/validation-2026-09-28.md"
+    return {"Real-flight validation": doc,
+            "COLMAP, same frames": doc and doc + "#baseline-colmap-on-exactly-the-same-keyframes",
             "3-min demo video": full_url(DEMO_URL)}
 
 INK = QColor("#0B1F44")
@@ -67,11 +68,11 @@ MILESTONES = [
     ("2025", "brain", "learned", "MapAnything", "Keetha et al.", "arXiv"),
     ("2026", None, "ours", "DRISHTI-3D", "Robos.Inc", "this work"),
 ]
-DATASETS = [("video", "navy", "PinPoint flight01", "100 surveyed ground points, Spain"),
-            ("globe", "navy", "IGN PNOA ortho + DEM", "Spain national reference, CC-BY 4.0"),
+DATASETS = [("video", "navy", "PinPoint flight01 + 02", "180 surveyed points, Spain"),
+            ("globe", "navy", "IGN ortho + LiDAR DTM", "Spain national reference, CC-BY 4.0"),
             ("gps", "navy", "DJI_1001 flight", "11.4-min video + Airdata GPS log")]
-EVIDENCE = [("chart", "ours", "flight01 benchmark report", "evidence/flight01-benchmark.md"),
-            ("check", "ours", "739 automated tests", "pytest, all passing"),
+EVIDENCE = [("chart", "ours", "Real-flight validation", "time, accuracy, failure cases"),
+            ("check", "ours", "COLMAP, same frames", "3.5x faster, as accurate"),
             ("video", "ours", "3-min demo video", "real app, real flight")]
 _warn = []
 
