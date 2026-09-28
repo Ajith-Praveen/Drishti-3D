@@ -29,24 +29,26 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
 $py = ".venv\Scripts\python.exe"
 
 Write-Host "==> syncing the locked environment (gui + ml + semantics + reference)"
-uv sync --extra gui --extra ml --extra semantics --extra reference
+uv sync --locked --extra gui --extra ml --extra semantics --extra reference
 if ($LASTEXITCODE -ne 0) { throw "uv sync failed" }
 
 if (-not $CpuOnly) {
     $torch = & $py -c "import torch; print(torch.__version__.split('+')[0])"
+    if ($LASTEXITCODE -ne 0) { throw "torch import failed" }
     $vision = & $py -c "import torchvision; print(torchvision.__version__.split('+')[0])"
+    if ($LASTEXITCODE -ne 0) { throw "torchvision import failed" }
     Write-Host "==> installing CUDA ($Cuda) builds of torch $torch / torchvision $vision"
     uv pip install --python $py --reinstall "torch==$torch" "torchvision==$vision" --index-url "https://download.pytorch.org/whl/$Cuda"
     if ($LASTEXITCODE -ne 0) { throw "CUDA torch install failed (try -Cuda cu126, or -CpuOnly)" }
 }
 
-uv pip install --python $py pyinstaller
-if ($LASTEXITCODE -ne 0) { throw "pyinstaller install failed" }
 & $py -c "import torch; print('  torch', torch.__version__, '| CUDA available:', torch.cuda.is_available())"
+if ($LASTEXITCODE -ne 0) { throw "torch import failed" }
 
 Write-Host "==> rendering the app icon"
 $env:QT_QPA_PLATFORM = "offscreen"
 & $py packaging\make_icon.py --ico packaging\DRISHTI-3D.ico
+if ($LASTEXITCODE -ne 0) { throw "icon rendering failed" }
 Remove-Item Env:QT_QPA_PLATFORM
 
 Write-Host "==> building"
@@ -54,7 +56,8 @@ Write-Host "==> building"
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
 
 Write-Host "==> smoke test: bundled imports"
-& dist\DRISHTI-3D\DRISHTI-3D.exe runtime check --skip-hash
+& $py packaging\smoke_test.py dist\DRISHTI-3D\DRISHTI-3D.exe
+if ($LASTEXITCODE -ne 0) { throw "bundled application smoke test failed" }
 Write-Host "==> packaging"
 Compress-Archive -Path dist\DRISHTI-3D -DestinationPath dist\DRISHTI-3D-windows-x64.zip -Force
 Write-Host "Built: dist\DRISHTI-3D\DRISHTI-3D.exe  (zip: dist\DRISHTI-3D-windows-x64.zip)"

@@ -1,7 +1,0 @@
-These numbers come from real flights, checked against independent references. The eleven minute D J I flight is finished in about six minutes. On a surveyed flight in Spain, with plain G P S and no R T K, our map lands about ninety centimetres from the national orthophoto, heights sit on average a quarter of a metre from national LiDAR, and lengths are right to within zero point four percent. On the very same frames, we are three and a half times faster than COLMAP, and slightly more accurate.
-<break time="1.0s" />
-It also knows when to say no. Moving cars on a highway? Fifty three seen, none left in the 3D surface. A flight it cannot solve? It stops and tells you why, instead of handing you a wrong map.
-<break time="1.0s" />
-Out come O B J, P L Y, L A S, GeoTIFF, G L T F and F B X, on one laptop, fully offline. And you can try it in your browser right now.
-<break time="1.0s" />
-Drishti 3D. One pass. Measured 3D. Honest by design. Thank you, from team Robos dot Inc.

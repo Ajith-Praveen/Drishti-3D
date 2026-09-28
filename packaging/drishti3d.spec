@@ -145,10 +145,11 @@ if BUNDLE_ML:
     # hook still names the old torchvision._C module, so without this the
     # frozen app fails with "operator torchvision::nms does not exist".
     # collect_dynamic_libs only matches lib*.so / *.dylib: it picks up the
-    # image codecs under .dylibs but not _C_stable.so itself.
+    # image codecs under .dylibs but not _C_stable.so itself. Windows ships
+    # the same dynamically loaded operators as .pyd, not .so.
     binaries += collect_dynamic_libs("torchvision")
     _tv_dir = Path(importlib.util.find_spec("torchvision").submodule_search_locations[0])
-    binaries += [(str(_so), "torchvision") for _so in sorted(_tv_dir.glob("*.so"))]
+    binaries += [(str(_so), "torchvision") for _pattern in ("*.so", "*.pyd") for _so in sorted(_tv_dir.glob(_pattern))]
     for _name in ("mapanything", "uniception", "hydra", "omegaconf", "timm"):
         hiddenimports += collect_submodules(_name)
         datas += collect_data_files(_name)
@@ -259,7 +260,10 @@ exe = EXE(  # noqa: F821
     strip=False,
     upx=False,  # UPX corrupts Qt/VTK shared libraries; never enable it here.
     icon=str(_ICO) if sys.platform == "win32" and _ICO.exists() else None,
-    console=False,
+    # Preserve CLI stdout/stderr on Windows; hide an owned console when
+    # launched from Explorer. Windowed mode replaces those streams with None.
+    console=sys.platform == "win32",
+    hide_console="hide-early" if sys.platform == "win32" else None,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

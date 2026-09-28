@@ -29,17 +29,22 @@ htmlcov/
 .idea/
 .DS_Store
 
-# Project data / model / output directories (pitch slides, voice scripts and
-# slide sources under output/ are kept; renders and videos are not)
+# Local data and generated material do not belong in the application repository.
 /data/
 /models/
 /results/
-output/*
-!output/slides/
-!output/demo/
-output/demo/*
-!output/demo/elevenlabs/
-!output/demo/src_v4/
+/output/
+/evidence/
+/slide_assets/
+/branding/
+/SLIDES_CONTENT.md
+/DJI_1001.csv
+/local_mac_*.yaml
+/packaging/aws/
+/Build DRISHTI-3D.command
+/Run DRISHTI-3D (from source).command
+/packaging/DRISHTI-3D.ico
+/packaging/DRISHTI-3D.png
 
 # Large capture media (exceeds GitHub's 100 MB file limit)
 *.mp4

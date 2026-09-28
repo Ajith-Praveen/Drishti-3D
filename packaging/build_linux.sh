@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build DRISHTI-3D for Linux (x86_64 or aarch64), with NVIDIA CUDA acceleration.
+# Build DRISHTI-3D for Linux x86_64, with NVIDIA CUDA acceleration.
 #
 #   ./packaging/build_linux.sh
 #
@@ -25,8 +25,7 @@ fi
 
 PY=.venv/bin/python
 echo "==> syncing the locked environment (gui + ml + semantics + reference)"
-uv sync --extra gui --extra ml --extra semantics --extra reference
-uv pip install --python "$PY" pyinstaller
+uv sync --locked --extra gui --extra ml --extra semantics --extra reference
 "$PY" -c "import torch; print('  torch', torch.__version__, '| CUDA', torch.version.cuda, '| GPU available:', torch.cuda.is_available())"
 
 echo "==> rendering the app icon"
@@ -49,7 +48,7 @@ Terminal=false
 DESKTOP
 
 echo "==> smoke test: bundled imports"
-QT_QPA_PLATFORM=offscreen "$APP/DRISHTI-3D" runtime check --skip-hash || echo "  (runtime check reported problems; see above)"
+"$PY" packaging/smoke_test.py "$APP/DRISHTI-3D"
 
 ARCH=$(uname -m)
 tar -C dist -czf "dist/DRISHTI-3D-linux-$ARCH.tar.gz" DRISHTI-3D

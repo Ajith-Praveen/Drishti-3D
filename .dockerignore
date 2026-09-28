@@ -1,0 +1,12 @@
+# Only app and build inputs belong in the image context.
+**
+!pyproject.toml
+!uv.lock
+!README.md
+!drishti3d/
+!drishti3d/**
+!packaging/
+!packaging/**
+**/__pycache__/**
+**/*.pyc
+packaging/aws/**

@@ -1,344 +1,80 @@
 # DRISHTI-3D
 
-Desktop app that turns a single-pass drone video into a georeferenced 3D model.
-Smart India Hackathon 2026, problem statement SIH26158 (NTRO).
+A native desktop application that reconstructs a geo-referenced 3D model from drone video and a flight telemetry log.
 
-> **Live prototype: https://13-234-83-238.sslip.io/** (opens the app in the browser: no install, no login)
->
-> - The prototype is deployed on AWS with only 2 CPU cores and no GPU, so a
->   reconstruction takes 3-5x longer there than on the Mac it was built on
->   (the 11.4-min flight: 29.8 min on AWS, 6.3 min on the Mac).
-> - Only one judge can run it at a time: everyone who opens the link shares the
->   same app session.
+The app selects keyframes, matches features, solves camera poses, estimates multi-view depth, and fuses a textured surface. The viewer supports confidence colouring, point coordinates, distance, area, volume, and elevation-profile measurements. Models and maps export to OBJ, PLY, LAS, glTF/GLB, FBX and GeoTIFF; measurements export to GeoJSON and KML.
 
-## Live prototype (no install, no login)
+## Run from source
 
-**https://13-234-83-238.sslip.io/**
-
-The link opens the real DRISHTI-3D desktop app full-screen in the browser. Click
-**Drone video** and pick `DJI_1001_3min.mp4` (the first 3 minutes of the DJI_1001
-flight), click **Telemetry** and pick `DJI_1001_3min.csv`, then press **Run**. The 3D
-model builds live in the viewer; the measurement tools are under **Tools**, and
-**File > Open Run** opens a finished run instantly.
-
-- **Slower than on a laptop GPU.** The prototype is deployed on an AWS server with
-  only 2 CPU cores and no GPU (EC2 `m7i-flex.large`), so a run takes longer than on
-  the Apple-silicon Mac it was developed on, which runs the heavy steps on its GPU:
-
-  | Sample | AWS prototype (2 CPU cores, no GPU) | MacBook (Apple-silicon GPU) |
-  |---|---|---|
-  | `DJI_1001_3min` (3-min clip) | 5.6 min | 1.8 min |
-  | `DJI_1001-1080p` (full 11.4-min flight, not on the prototype) | 29.8 min | 6.3 min |
-
-  The prototype carries only the 3-minute clip, so a judge sees a complete run in
-  about six minutes.
-- **One judge at a time.** The AWS deployment serves a single shared app session:
-  everyone who opens the link sees and controls the same screen. Please run one
-  reconstruction at a time and wait for it to finish before the next judge starts.
-
-## Results at a glance
-
-| | Measured on real flights |
-|---|---|
-| **Speed** | 11.4-minute DJI video -> finished model in **6.3 min** on an Apple M5 laptop (target: < 15 min per 10 min of video); linear in video length (36 s per minute); PinPoint flight01's 6-min video in 6.1 min, 3.5x faster than COLMAP's sparse model on the same frames |
-| **Accuracy** | flight01 (Spain), standalone GPS: orthomosaic **0.92 m** from the national orthophoto, heights **+0.23 m** from IGN's LiDAR terrain model, lengths within **0.38 %**; whole block within 0.3 m of the map. The unseen flight02 was rejected safely (cameras could not be posed). See below. |
-| **Model** | true 3D mesh from per-camera stereo: DJI_1001 **8.0 M vertices, 84 % directly measured**, confidence per point; unseen areas are not invented |
-| **Outputs** | OBJ, PLY, LAS, GeoTIFF (DSM, DTM, orthomosaic, confidence), glTF/GLB, FBX, textured OBJ/GLB, HTML/TXT report, cameras.json |
-| **Viewer** | desktop app with live preview, heatmaps, and point / distance / area / volume / profile tools exporting GeoJSON and KML |
-
-Limits, stated plainly: no RTK checkpoints were available; on flight01, strips
-flown in opposite directions disagree by ~3 m, so Measured 3D covers only part
-of that flight and Terrain 2.5D, which covers all of it, is 3.3 m per tile; the
-lower flight02 could not be posed at all; a downward camera cannot see facades.
-
-## Footage, time and accuracy
-
-Every number is from a run of the current code on one Apple M5 laptop, scored against independent
-references (Spain's national IGN orthophoto and its LiDAR terrain model, and PinPoint's surveyed
-features). Method, every run, the ablation and the degraded-input tests:
-[evidence/validation-2026-09-28.md](evidence/validation-2026-09-28.md).
-
-| Footage | Video | Time on Mac | Accuracy achieved | Checked against |
-|---|---|---|---|---|
-| **DJI_1001**, Austin (DJI, camera down, ~280 m) | 11.4 min, 1080p | **6.3 min** | Valid; 8.0 M-vertex mesh, 84 % of it measured | no ground truth published |
-| DJI_1001, first 2 / 5 / 10 min | 1080p | 1.3 / 2.9 / 6.0 min | Valid each time; time grows linearly, about 36 s per minute of video | same flight |
-| **PinPoint flight01**, Spain (fixed-wing, 100-127 m, standalone GPS, no RTK) | 6 min, 720p | **6.1 min** | orthomosaic **0.92 m** from the national orthophoto (median of 60 m tiles; 1.89 m before converting GPS to the map's datum); heights **+0.23 m** from IGN's LiDAR terrain model; lengths between points 100-500 m apart within **0.38 %** | IGN PNOA orthophoto, IGN MDT05 (LiDAR) |
-| PinPoint flight01, whole block (Terrain 2.5D) | 6 min, 720p | 4.5 min | block within 0.30 m of the national map on average, but 3.3 m per tile: strips flown in opposite directions disagree | same |
-| **PinPoint flight02** (never seen before the code was frozen) | 10 min, 720p | stopped after 5.5 min | **rejected**: a third of the cameras could not be posed from the images, so no model was produced | – |
-| COLMAP 4.2 on the same 193 flight01 keyframes | 6 min, 720p | 21.5 min, sparse only | 3.88 m against DRISHTI's 3.63 m on the same 19 survey points (same scoring) | same survey script |
-
-SIH26158 targets: under 15 min per 10 min of video (met on every run) and 1 m spatial accuracy.
-
-What this shows, and what it does not:
-
-- **Standalone GPS is enough to place the model.** On flight01 the whole block sits within
-  0.3 m of Spain's national map once GPS (ITRF) is converted to the map's datum (ETRS89, 0.97 m of
-  plate drift there). Where Measured 3D measures, the orthomosaic is 0.92 m from the map and heights
-  are 0.23 m from the LiDAR model.
-- **1 m everywhere is not shown yet.** Terrain 2.5D covers all of flight01 but is 3.3 m per tile,
-  because strips flown in opposite directions disagree (rolling shutter the camera model does not
-  handle). The hold-out flight02, lower and over a river valley, could not be posed at all; the
-  pipeline stopped instead of producing a wrong model. RTK or a denser keyframe spacing at low
-  altitude is the next step.
-- **PinPoint needs two inputs the problem statement allows:** the camera calibration (72.3 deg,
-  k1 -0.241, k2 0.050; COLMAP's self-calibration agrees to 1 px and 0.001) and SIFT matching
-  (Settings > Feature matching), because DISK + LightGlue detects on a half-size image and 720p is
-  too coarse for that. DJI_1001 (1080p) runs on the defaults.
-- **Heights need a known focal length.** DJI_1001's log has no height above ground, so its focal
-  cannot be measured from the video; horizontal positions do not depend on it, heights do. The report
-  card now says so on every such run; give the camera's calibration (Settings > Camera) for heights.
-- **The optional map alignment is not reliable yet:** on flight01 it moved the model 3.3 m the wrong
-  way. The earlier 0.29 m figure came from a map-aligned run with older settings and could not be
-  reproduced; use the GPS-only numbers above.
-- **Measured** means a mesh vertex within 1.5 voxels of a depth that another camera confirmed (depth
-  agreement and a 1-pixel round trip). On flight01, cells tagged MEASURED are 0.98 m from the LiDAR
-  terrain model; LOW-confidence and INFERRED cells are 3-4 m away. Ground no camera measured is
-  left open, never invented.
-- **Moving traffic stays out of the model:** on the DJI_1001 highway, 53 moving vehicles were found
-  in the video frames and none of them left a bump in the 3D surface; with the cross-view depth
-  check switched off, 8 of the same 53 (15 %) did.
-
-## Pipeline stages
-
-1. **Ingest** — decode the drone video and align it with flight telemetry.
-2. **Triage** — select a well-distributed, sharp, low-blur set of keyframes.
-3. **Clock sync** — check the telemetry clock against the keyframes' own image
-   rotation (see below).
-4. **Pose prior** — bundle-adjust the keyframe cameras against GPS and gimbal priors.
-5. **Geometry** — `auto` (default) measures depth per camera with multi-view
-   stereo, validates it across views, and reconstructs volumetrically in 3D.
-6. **Fusion** — merge per-frame geometry into a single confidence-weighted surface.
-7. **Export** — georeference and write the final model (e.g. LAS/PLY) to disk.
-
-## Reconstruction modes
-
-Settings > Reconstruction (or `--dense-method`):
-
-- **Automatic / Measured 3D** (`auto`, default, or `mvs3d`;
-  `drishti3d/geometry/mvs3d.py`). A true 3D mesh, measured, for downward,
-  forward and oblique footage alike:
-  - depth per camera by GPU plane-sweep stereo (NCC, best 2 of 4 source
-    views) with semi-global matching over the cost volume, so the depth maps
-    are dense and smooth instead of speckled;
-  - on dense mapping flights, depth maps for a subset of reference views
-    chosen so every part of the ground is still covered five times (all
-    keyframes remain stereo sources);
-  - a depth is kept only if neighbouring depth maps agree with it in depth
-    and after a round-trip reprojection (1 px);
-  - the survivors are fused in an Open3D TSDF volume and meshed; walls,
-    tree crowns and overhangs stay 3D;
-  - downward flights also get a true-ortho texture (orthomosaic.tif,
-    textured OBJ/glTF), and enclosed gaps up to 8 m that a downward camera
-    cannot see (under canopy rims, beside walls) are closed from their rims
-    without new vertices; the closed area is reported.
-
-  Nothing unseen is invented: the outer border and large unseen areas stay
-  open. If the cameras cannot be solved, Automatic falls back to Learned 3D;
-  explicit Measured 3D stops with an error instead. The resolution setting
-  sets the stereo resolution (at least 768 px).
-- **Learned 3D** (`full3d`). Optional learned multi-view depth followed by
-  volumetric TSDF meshing. Neither nadir height-map fusion nor ground-footprint
-  view culling is used. This is the legacy depth-model path, not the default.
-- **Terrain 2.5D** (`heightfield`). One height per ground cell, walls and
-  unseen areas filled and tiered INFERRED. Complete DSM coverage, 2.5D shape.
-
-Measured on this project's footage (MPS, M-series Mac):
-
-| Flight | Measured 3D | Notes |
-|---|---|---|
-| DJI_1001 (nadir, ~280 m, 11.4 min) | 50 views (49 depth maps), 87 % of depths confirmed across views, 8.0 M vertices at 0.5 m, 84 % MEASURED; geometry 143 s, run ~455 s | trees as crowns, houses as blocks; Terrain 2.5D extruded both into prisms |
-| PinPoint flight01 (nadir grid, ~116 m) | 185 views (84 depth maps), 2.2 M vertices at 0.28 m; geometry 174 s, run ~470 s (budget 540 s) | stable features vs the IGN orthophoto 0.29 m median (13 features, all <= 1 m; Terrain 2.5D 0.85 m) but 26/64 survey points on measured surface (Terrain 2.5D 61/64): strips flown in opposite directions disagree by ~3 m in depth, so that ground stays open |
-| Front_View_Light (vineyard, ~1 m up, forward) | 11 views, 184 k vertices at 0.06 m; geometry 26 s | vine rows and trees; the near ground is seen only at grazing angles |
-
-The flight01 strip disagreement is a camera-solve limit, not a stereo one:
-matching across strips (`_MATCH_FOOTPRINT_FRACTION` in
-`pipeline/stages.py`) makes the strips agree to 0.3 m but bends the block
-against IGN (rolling shutter flips its skew with flight direction and the
-camera model is rigid), so it stays off until the camera model handles it.
+Requires Python 3.12 and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-.venv/bin/python -m drishti3d.pipeline.runner VIDEO.mp4 \
-  --telemetry LOG.csv --config full_3d.yaml --out output/full3d_run
+uv sync --locked --extra gui --extra ml --extra semantics --extra texture --extra reference
 ```
 
-`--dense-method full3d` overrides a loaded configuration. `mapanything` is
-accepted as a legacy alias. Full 3D costs more time and memory than terrain
-MVS, and does not by itself establish metric accuracy or recover unseen
-walls. Use footage with oblique views for façades; if the log lacks camera
-orientation and the video is oblique, set
-`geometry.assume_nadir_without_gimbal: false`. Reports record the actual
-representation; GeoTIFF DSM/DTM exports remain 2.5D derived products.
+On macOS and Linux, launch with `./run.sh`. On Windows:
 
-Launch the updated source app with `Run DRISHTI-3D (from source).command`;
-previously built application bundles need rebuilding to include changes.
+```powershell
+.venv\Scripts\python.exe -m drishti3d.app.main
+```
 
-## Optional terrain surface: height-field multi-view stereo
-
-With explicit `geometry.dense_method: heightfield`, a nadir flight whose keyframes
-all have a bundle-adjusted pose gets its surface measured directly
-(`drishti3d/geometry/heightfield.py`):
-
-- It sweeps candidate heights for every ground cell, projecting through the
-  solved lens into every view that sees the cell.
-- It keeps the height where the views agree.
-- It colours each cell with the median across the views: a true orthophoto.
-- The mesh is single-layer by construction, and it is photo-textured through
-  planar UVs (`model_textured.obj/.png`, `model_textured.glb`), so no texture
-  atlas or `xatlas` is needed.
-
-On PinPoint flight01, with the same cameras, this gives DSM-vs-DEM MAD 1.4-1.7 m
-in ~30 s, against 7.5 m in ~20 min for backbone depth fusion. See
-`evidence/flight01-benchmark.md`. `dense_method: mapanything` forces the
-backbone with full-3D fusion; `heightfield` reports an error when the flight is not nadir.
-
-## Known camera calibration and telemetry clock
-
-- The problem statement lists camera intrinsics as an optional input:
-  - `--fx/--fy/--cx/--cy`, `--hfov`, `--dist "k1,k2,p1,p2[,k3]"` and
-    `--calibration-width` on `drishti3d-run`;
-  - `ingest.camera_*` in a config;
-  - Camera focal / Lens distortion in Settings.
-
-  All of these supply a calibration that is kept fixed (provenance `user`).
-- `TimeSyncStage` measures the video-to-log clock offset from keyframe rotation
-  against the logged heading:
-  - an unmeasured offset is replaced;
-  - an explicit one is kept, but a disagreement over `ingest.auto_sync_warn_s`
-    is reported on the report card;
-  - `ingest.auto_sync: correct` applies the measurement anyway, and `off` skips it.
-- RTK / PPK GPS (the problem statement's optional corrections input) is read from
-  CSV logs:
-  - accuracy columns in metres (`hAcc`/`vAcc`, `eph`/`epv`,
-    `horizontal_accuracy`, DJI `RtkStdLat`/`RtkStdLon`/`RtkStdHgt`; `(mm)` and
-    `(cm)` units converted);
-  - or a fix state (`fix_type`/`gps_status` 6 = RTK fixed, 5 = float; DJI
-    `RtkFlag` 50/34; `rtk_status` text). A fix state with no accuracy counts as
-    5 cm fixed / 50 cm float.
-
-  Each camera's GPS weight then follows the log's accuracy plus the video-to-log
-  timing error (speed × clock uncertainty), never below 0.25 m for the
-  camera-to-antenna offset. The report claims centimetre-level absolute accuracy
-  only when the log itself reports RTK-grade accuracy. Logs without these columns
-  behave exactly as before (2.5 m prior).
-
-## Benchmark
-
-The flight01 and flight02 numbers come from the PinPoint validation dataset
-([doi:10.5281/zenodo.22671839](https://doi.org/10.5281/zenodo.22671839)); how
-they were measured and every run is in
-[evidence/validation-2026-09-28.md](evidence/validation-2026-09-28.md). To run
-a PinPoint clip, give the clip's start in the original video plus the dataset's
-sync as the telemetry offset (flight01: frame 0 of the clip at 120.967 s ->
-`--telemetry-offset 122.167`), the camera calibration
-(`--hfov 72.3 --dist=-0.241,0.050,0,0`) and SIFT matching. The older
-[evidence/flight01-benchmark.md](evidence/flight01-benchmark.md) records the
-development history; its map-aligned figures are superseded.
-
-## Setup
+Select a drone video and telemetry log in the app, choose the output folder, then press **Run**. To reconstruct without the GUI:
 
 ```bash
-# Install uv if you haven't already: https://docs.astral.sh/uv/
-uv sync
-
-# Optional extras
-uv sync --extra gui   # PySide6 desktop UI + VTK viewport
-uv sync --extra ml    # torch / torchvision (CUDA or MPS acceleration)
-uv sync --extra semantics  # SegFormer semantic classification + dynamic-object masking
-uv sync --extra texture    # xatlas UV unwrapping for the photographic texture atlas
-uv sync --extra reference  # rasterio, for reference-orthophoto/DEM alignment
+.venv/bin/python -m drishti3d.pipeline.runner flight.mp4 --telemetry flight.csv --config full_3d.yaml --out results/flight
 ```
 
-The `ml` extra also installs the pinned MapAnything implementation. Its weights
-are downloaded on first use, or loaded from `DRISHTI3D_MAPANYTHING_WEIGHTS` for
-offline runs. A missing reconstruction model now fails the geometry stage;
-`--backbone null` is explicitly synthetic and is only for demos.
-It also installs kornia for the default DISK + LightGlue feature matching
-(weights downloaded once on first use); without kornia, matching logs a
-warning and falls back to SIFT.
+On Windows, use `.venv\Scripts\python.exe` instead of `.venv/bin/python`. Run the command with `--help` for calibration, telemetry timing, and reference-data options.
 
-For video-based depth refinement, keep `geometry.plane_sweep: true`. It matches
-source image patches after metric depth fitting, including rotated camera views.
-Nadir height-map meshes also respect `fusion.photometric_reject_before_mesh`:
-vertices contradicted by textured source views and their incident triangles are
-removed, leaving gaps rather than inventing a surface. This can increase runtime
-and reduce mesh coverage. Neither image agreement nor a completed export alone
-establishes absolute metric accuracy; check camera alignment and withheld survey
-points before using measurements.
+## Build desktop packages
 
-## Measuring on the model
+Build on the target operating system; PyInstaller does not cross-compile.
 
-Tools menu, on any loaded or finished run (points snap to the model surface;
-a click places a point, a drag still orbits; right-click, double-click or
-Enter finishes; Backspace undoes a point; Esc cancels):
+| Platform | Command | Output |
+| --- | --- | --- |
+| macOS Apple Silicon | `./packaging/build_app.sh` after syncing the environment above | `dist/DRISHTI-3D.app` |
+| Windows x64 | `powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1` | `dist/DRISHTI-3D-windows-x64.zip` |
+| Linux x86_64 | `./packaging/build_linux.sh` | `dist/DRISHTI-3D-linux-x86_64.tar.gz` |
 
-- **Point** (P): latitude, longitude and elevation above sea level.
-- **Distance** (M): 3D length, horizontal length and height difference.
-- **Area** (Shift+M): planimetric area and perimeter of a polygon.
-- **Volume** (V): cut and fill against a base plane fitted through the
-  outline's own corners (a stockpile, debris, a pit).
-- **Elevation profile** (L): heights along a route, with climb, descent and
-  the steepest slope, as a chart (exportable to CSV).
-- **Export Measurements** writes them all as GeoJSON (QGIS/ArcGIS) or KML
-  (Google Earth), in WGS84 with sea-level elevations.
+Windows defaults to the CUDA 12.6 wheels; use `-CpuOnly` for a CPU-only package or `-Cuda cu130` for that CUDA wheel variant. Linux x86_64 PyTorch wheels include CUDA runtime dependencies. Acceleration selects NVIDIA CUDA, Apple Metal, or CPU as available. NVIDIA acceleration requires a compatible host driver.
 
-A measurement touching INFERRED surface carries a warning.
+The Linux CI build uses Ubuntu 24.04. Install the Qt/VTK system libraries listed in `packaging/build_linux.sh` before building or running the package. Linux ARM is not supported by the current Open3D dependency.
 
-**Video beside the model** (View > Video Beside Model, Ctrl+Shift+V): scrub
-through the keyframes and the drone's own video frame appears next to the 3D
-view, with the camera that took it highlighted; *Look through this camera*
-puts the 3D view at that camera with its field of view, so the frame and the
-reconstruction can be compared directly.
+Every full desktop build must pass `packaging/smoke_test.py` before packaging. The checks exercise native torchvision operators, geospatial libraries in both import orders, the reconstruction modules, and Qt resources. They do not require a display, GPU, or optional model downloads.
 
-## Moving objects and semantic masking
+## Docker
 
-Measured 3D keeps only depths that neighbouring cameras agree on, and the
-orthophoto takes the median colour across views, so moving vehicles and
-people drop out of the geometry and the texture without any model (the
-highway traffic on DJI_1001 is absent from its orthomosaic). The optional
-`semantics` extra (SegFormer, `transformers`) additionally masks vehicles,
-people and sky before depth is measured. Its default ADE20K checkpoint is
-trained on ground-level photos: on downward flights it found no vehicles
-(0% on DJI_1001), so it is skipped there (`semantics.skip_nadir_ground_level`)
-and runs on forward/oblique footage, where it also masks sky. For nadir
-footage set `semantics.checkpoint` to an aerial model. Model weights (256 MB)
-download on first use.
+Build the Linux x86_64 image:
 
-## Windows and Linux (NVIDIA GPU)
+```bash
+docker build --platform linux/amd64 -f packaging/Dockerfile -t drishti3d .
+docker run --rm drishti3d
+docker run --rm --gpus all -v "$PWD/data:/data" drishti3d \
+  run /data/flight.mp4 --telemetry /data/flight.csv --out /data/results
+```
 
-The pipeline picks CUDA automatically when an NVIDIA GPU is present (then
-Apple MPS, then CPU). Builds:
+The default command prints pipeline help. NVIDIA acceleration requires the NVIDIA Container Toolkit; omit `--gpus all` to run on CPU. The image also supports `app` through an X11 display; see the Dockerfile header for the required mounts and environment.
 
-- **Windows 10/11 x64**: `powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1`
-  (installs the CUDA 12.6 build of the locked torch from PyTorch's index; `-Cuda cu130`
-  for newer drivers, `-CpuOnly` without a GPU) -> `dist\DRISHTI-3D\DRISHTI-3D.exe`.
-- **Linux x86_64** (Ubuntu 22.04+): `./packaging/build_linux.sh` -> `dist/DRISHTI-3D/`
-  with a `.desktop` entry. PyPI's Linux torch already carries CUDA.
-- **Docker, Linux + NVIDIA** (NVIDIA Container Toolkit):
-  `docker build -f packaging/Dockerfile -t drishti3d .`, then
-  `docker run --rm --gpus all -v "$PWD/data:/data" drishti3d run /data/flight.mp4 --telemetry /data/flight.csv --out /data/out`
-  (the desktop app over X11: see the Dockerfile header).
-- **CI**: `.github/workflows/build.yml` builds the Windows, Linux and macOS
-  apps and the Docker image (run it from the Actions tab or with a `v*` tag).
+Run the same mandatory smoke checks used by CI:
 
-Open3D ships Linux wheels for x86_64 only, so Linux ARM is not supported.
+```bash
+docker run --rm --entrypoint python drishti3d:latest packaging/smoke_test.py python packaging/entry.py
+```
 
-## Desktop app build
+## Models and offline operation
 
-`./packaging/build_app.sh` bundles torch and MapAnything whenever they are
-installed, so the built app can reconstruct as well as open files. The build
-ends with the same offline runtime preflight every run performs. Set
-`DRISHTI3D_BUILD_WEIGHTS_DIR` to the verified checkpoint
-(`python -m drishti3d.runtime locate`) to bundle the 4.9 GB weights for an
-air-gapped machine. Headless use of the built app:
-`DRISHTI-3D.app/Contents/MacOS/DRISHTI-3D run VIDEO --telemetry LOG --out DIR`.
+Measured 3D is the default reconstruction mode. The optional learned-depth fallback uses MapAnything; its large checkpoint is not included in standard CI artifacts. The `runtime check` command specifically validates that optional offline runtime and reports missing assets as errors.
 
-## Coordinate conventions
+Set `DRISHTI3D_MAPANYTHING_WEIGHTS` to a verified local checkpoint for that fallback. For an offline bundle, set `DRISHTI3D_BUILD_WEIGHTS_DIR` before building. `DRISHTI3D_BUILD_TORCH_HUB` can provide cached DINOv2 code and DISK/LightGlue weights. Learned matching and semantic segmentation may need model caches prepared before offline use; matching can fall back to SIFT.
 
-- **World frame**: ENU (East-North-Up), units in metres, Z-up. X points East,
-  Y points North, Z points Up. All georeferenced/reconstructed geometry
-  (poses, point clouds) is expressed in this frame unless otherwise noted.
-- **Camera frame**: OpenCV convention. X points right, Y points down, Z
-  points forward (out of the lens, into the scene).
-- **Geographic coordinates**: latitude/longitude in decimal degrees (WGS84),
-  altitude in metres. Distinct from the local ENU world frame; conversion
-  between the two is handled during georeferencing (e.g. via `pyproj`).
+## Build verification
+
+The GitHub Actions `build` workflow builds and smoke-tests Windows, Linux, macOS, and Docker. Start it through **Actions → build → Run workflow**, or push a version tag beginning with `v`. Desktop archives are attached to the run.
+
+Local regression checks for the build validator:
+
+```bash
+.venv/bin/python -m unittest discover -s packaging -p test_smoke_test.py
+```
+
+The repository contains application source, bundled UI assets, dependencies, configuration, and build infrastructure. Captured flights, generated output, presentation material, local experiments, and deployment-demo scripts are excluded.

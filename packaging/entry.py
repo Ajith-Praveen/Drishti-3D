@@ -68,6 +68,21 @@ def _selftest_imports(argv: list[str]) -> int:
 
             pts = torch.rand(1, 8, 2)
             sampson_epipolar_distance(pts, pts, torch.eye(3)[None])
+        elif name == "torchvision":
+            import torch
+
+            # An import alone can miss absent or incompatible compiled ops.
+            kept = module.ops.nms(torch.tensor([[0., 0., 2., 2.], [0., 0., 2., 2.]]),
+                                  torch.tensor([0.9, 0.8]), 0.5)
+            assert kept.tolist() == [0], "torchvision native NMS failed"
+        elif name == "PySide6":
+            from PySide6.QtWidgets import QApplication
+            from drishti3d.app import icons, theme
+
+            app = QApplication.instance() or QApplication([])
+            theme.load_bundled_fonts()
+            assert not icons.app_icon().isNull(), "bundled application icon missing"
+            app.processEvents()
     print("imports ok:", " ".join(argv))
     return 0
 

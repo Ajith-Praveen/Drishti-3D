@@ -7,6 +7,7 @@
 # Run from the project root.
 
 set -euo pipefail
+cd "$(dirname "$0")/.."
 
 PYTHON="${PYTHON:-.venv/bin/python}"
 
@@ -58,35 +59,13 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     echo "==> ad-hoc signing"
     codesign -s - --force --all-architectures --deep "$APP" 2>/dev/null || true
     codesign --verify --deep "$APP" && echo "  signature OK"
-    # Prove the bundle can reconstruct, not just open: the same offline
-    # preflight every run performs (packages, pinned versions, backend,
-    # weights). A slim build (DRISHTI3D_BUNDLE_ML=0) skips this.
+    # Validate the default pipeline without requiring optional learned-depth
+    # assets. Explicitly bundled fallback weights must pass their own check.
     if [ "${DRISHTI3D_BUNDLE_ML:-auto}" != "0" ]; then
         echo "==> reconstruction runtime check (frozen app)"
-        if "$APP/Contents/MacOS/DRISHTI-3D" runtime check --skip-hash; then
-            echo "  runtime OK"
-        elif [ -n "${CI:-}" ]; then
-            # CI runners have no offline MapAnything weights (4.9 GB). They are only
-            # needed by the Learned 3D fallback; Measured 3D, the default, runs
-            # without them, and the pipeline import check below still has to pass.
-            echo "  (CI: learned-fallback weights not bundled; the runtime check above lists them)"
-        else
-            echo "error: the built app cannot reconstruct real footage (runtime check failed above)" >&2
-            exit 1
-        fi
-        # The runtime check imports torch and the model, not the pipeline.
-        # Import the libraries whose bundled copies have collided before
-        # (pyproj and rasterio both ship a different libproj), in BOTH
-        # orders, then every stage via `run --help`.
-        echo "==> pipeline import check (frozen app)"
-        if "$APP/Contents/MacOS/DRISHTI-3D" run --help > /dev/null \
-            && "$APP/Contents/MacOS/DRISHTI-3D" selftest-imports pyproj rasterio \
-            && "$APP/Contents/MacOS/DRISHTI-3D" selftest-imports rasterio pyproj \
-            && "$APP/Contents/MacOS/DRISHTI-3D" selftest-imports kornia; then
-            echo "  pipeline imports OK"
-        else
-            echo "error: the built app cannot import the pipeline (see the traceback above)" >&2
-            exit 1
+        "$PYTHON" packaging/smoke_test.py "$APP/Contents/MacOS/DRISHTI-3D"
+        if [ -n "${DRISHTI3D_BUILD_WEIGHTS_DIR:-}" ]; then
+            "$APP/Contents/MacOS/DRISHTI-3D" runtime check --skip-hash
         fi
     fi
     echo

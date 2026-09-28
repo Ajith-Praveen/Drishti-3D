@@ -49,4 +49,4 @@ RUN printf '%s\n' '#!/bin/sh' \
         'exec python /opt/drishti3d/packaging/entry.py "$@"' > /usr/local/bin/drishti3d-entry \
     && chmod +x /usr/local/bin/drishti3d-entry
 ENTRYPOINT ["drishti3d-entry"]
-CMD ["runtime", "check", "--skip-hash"]
+CMD ["run", "--help"]

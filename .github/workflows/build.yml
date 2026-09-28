@@ -35,9 +35,11 @@ jobs:
             libxcb-keysyms1 libxcb-shape0 libxcb-xinerama0 libxcb-randr0 libxcb-render-util0 ffmpeg
       - name: macOS environment
         if: runner.os == 'macOS'
-        run: uv sync --extra gui --extra ml --extra semantics --extra reference && uv pip install pyinstaller
+        run: uv sync --locked --extra gui --extra ml --extra semantics --extra reference
       - name: build
         run: ${{ matrix.script }}
+      - name: Build validator regression checks
+        run: uv run --no-sync python -m unittest discover -s packaging -p test_smoke_test.py
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.os }}
@@ -51,8 +53,4 @@ jobs:
       - name: build the Linux + NVIDIA image
         run: docker build -f packaging/Dockerfile -t drishti3d:cuda .
       - name: smoke test (CPU)
-        # The runtime check reports the Learned 3D fallback weights, which are not in
-        # the image; the default Measured 3D pipeline must still import and start.
-        run: |
-          docker run --rm drishti3d:cuda runtime check --skip-hash || echo "learned-fallback weights not in the image"
-          docker run --rm drishti3d:cuda run --help > /dev/null
+        run: docker run --rm --entrypoint python drishti3d:cuda packaging/smoke_test.py python packaging/entry.py
