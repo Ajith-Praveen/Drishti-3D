@@ -3,20 +3,98 @@
 Desktop app that turns a single-pass drone video into a georeferenced 3D model.
 Smart India Hackathon 2026, problem statement SIH26158 (NTRO).
 
+> **Live prototype: https://13-234-83-238.sslip.io/** (opens the app in the browser: no install, no login)
+>
+> - The prototype is deployed on AWS with only 2 CPU cores and no GPU, so a
+>   reconstruction takes 3-5x longer there than on the Mac it was built on
+>   (the 11.4-min flight: 29.8 min on AWS, 6.3 min on the Mac).
+> - Only one judge can run it at a time: everyone who opens the link shares the
+>   same app session.
+
+## Live prototype (no install, no login)
+
+**https://13-234-83-238.sslip.io/**
+
+The link opens the real DRISHTI-3D desktop app full-screen in the browser. Click
+**Drone video** and pick `DJI_1001_3min.mp4` (or `DJI_1001-1080p.mp4` for the full
+flight), click **Telemetry** and pick the matching `.csv`, then press **Run**. The 3D
+model builds live in the viewer; the measurement tools are under **Tools**.
+
+- **Slower than on a laptop GPU.** The prototype is deployed on an AWS server with
+  only 2 CPU cores and no GPU (EC2 `m7i-flex.large`), so a run takes longer than on
+  the Apple-silicon Mac it was developed on, which runs the heavy steps on its GPU:
+
+  | Sample | AWS prototype (2 CPU cores, no GPU) | MacBook (Apple-silicon GPU) |
+  |---|---|---|
+  | `DJI_1001_3min` (3-min clip) | 5.6 min | 1.8 min |
+  | `DJI_1001-1080p` (full 11.4-min flight) | 29.8 min | 6.3 min |
+
+  Start with the 3-minute clip to see a complete run quickly.
+- **One judge at a time.** The AWS deployment serves a single shared app session:
+  everyone who opens the link sees and controls the same screen. Please run one
+  reconstruction at a time and wait for it to finish before the next judge starts.
+
 ## Results at a glance
 
 | | Measured on real flights |
 |---|---|
-| **Speed** | 11.4-minute DJI video -> finished model in **6.9 min** on an M-series laptop (target: < 15 min per 10 min of video); PinPoint flight01 6-min video in ~7.8 min |
-| **Accuracy** | flight01 (Spain): surveyed features sit a median **0.29 m** from the national orthophoto (IGN PNOA, 13 features, all <= 1 m) in measured 3D, 0.85 m (25 features) in Terrain 2.5D; camera track vs COLMAP 1.6 m |
+| **Speed** | 11.4-minute DJI video -> finished model in **6.3 min** on an Apple M5 laptop (target: < 15 min per 10 min of video); linear in video length (36 s per minute); PinPoint flight01's 6-min video in 6.1 min, 3.5x faster than COLMAP's sparse model on the same frames |
+| **Accuracy** | flight01 (Spain), standalone GPS: orthomosaic **0.92 m** from the national orthophoto, heights **+0.23 m** from IGN's LiDAR terrain model, lengths within **0.38 %**; whole block within 0.3 m of the map. The unseen flight02 was rejected safely (cameras could not be posed). See below. |
 | **Model** | true 3D mesh from per-camera stereo: DJI_1001 **8.0 M vertices, 84 % directly measured**, confidence per point; unseen areas are not invented |
 | **Outputs** | OBJ, PLY, LAS, GeoTIFF (DSM, DTM, orthomosaic, confidence), glTF/GLB, FBX, textured OBJ/GLB, HTML/TXT report, cameras.json |
 | **Viewer** | desktop app with live preview, heatmaps, and point / distance / area / volume / profile tools exporting GeoJSON and KML |
 
-Limits, stated plainly: absolute accuracy has not been checked against RTK
-checkpoints (none were available); on flight01, strips flown in opposite
-directions disagree by ~3 m in depth, so measured 3D covers only part of that
-flight (Terrain 2.5D covers it fully); a downward camera cannot see facades.
+Limits, stated plainly: no RTK checkpoints were available; on flight01, strips
+flown in opposite directions disagree by ~3 m, so Measured 3D covers only part
+of that flight and Terrain 2.5D, which covers all of it, is 3.3 m per tile; the
+lower flight02 could not be posed at all; a downward camera cannot see facades.
+
+## Footage, time and accuracy
+
+Every number is from a run of the current code on one Apple M5 laptop, scored against independent
+references (Spain's national IGN orthophoto and its LiDAR terrain model, and PinPoint's surveyed
+features). Method, every run, the ablation and the degraded-input tests:
+[evidence/validation-2026-09-28.md](evidence/validation-2026-09-28.md).
+
+| Footage | Video | Time on Mac | Accuracy achieved | Checked against |
+|---|---|---|---|---|
+| **DJI_1001**, Austin (DJI, camera down, ~280 m) | 11.4 min, 1080p | **6.3 min** | Valid; 8.0 M-vertex mesh, 84 % of it measured | no ground truth published |
+| DJI_1001, first 2 / 5 / 10 min | 1080p | 1.3 / 2.9 / 6.0 min | Valid each time; time grows linearly, about 36 s per minute of video | same flight |
+| **PinPoint flight01**, Spain (fixed-wing, 100-127 m, standalone GPS, no RTK) | 6 min, 720p | **6.1 min** | orthomosaic **0.92 m** from the national orthophoto (median of 60 m tiles; 1.89 m before converting GPS to the map's datum); heights **+0.23 m** from IGN's LiDAR terrain model; lengths between points 100-500 m apart within **0.38 %** | IGN PNOA orthophoto, IGN MDT05 (LiDAR) |
+| PinPoint flight01, whole block (Terrain 2.5D) | 6 min, 720p | 4.5 min | block within 0.30 m of the national map on average, but 3.3 m per tile: strips flown in opposite directions disagree | same |
+| **PinPoint flight02** (never seen before the code was frozen) | 10 min, 720p | stopped after 5.5 min | **rejected**: a third of the cameras could not be posed from the images, so no model was produced | – |
+| COLMAP 4.2 on the same 193 flight01 keyframes | 6 min, 720p | 21.5 min, sparse only | 3.88 m against DRISHTI's 3.63 m on the same 19 survey points (same scoring) | same survey script |
+
+SIH26158 targets: under 15 min per 10 min of video (met on every run) and 1 m spatial accuracy.
+
+What this shows, and what it does not:
+
+- **Standalone GPS is enough to place the model.** On flight01 the whole block sits within
+  0.3 m of Spain's national map once GPS (ITRF) is converted to the map's datum (ETRS89, 0.97 m of
+  plate drift there). Where Measured 3D measures, the orthomosaic is 0.92 m from the map and heights
+  are 0.23 m from the LiDAR model.
+- **1 m everywhere is not shown yet.** Terrain 2.5D covers all of flight01 but is 3.3 m per tile,
+  because strips flown in opposite directions disagree (rolling shutter the camera model does not
+  handle). The hold-out flight02, lower and over a river valley, could not be posed at all; the
+  pipeline stopped instead of producing a wrong model. RTK or a denser keyframe spacing at low
+  altitude is the next step.
+- **PinPoint needs two inputs the problem statement allows:** the camera calibration (72.3 deg,
+  k1 -0.241, k2 0.050; COLMAP's self-calibration agrees to 1 px and 0.001) and SIFT matching
+  (Settings > Feature matching), because DISK + LightGlue detects on a half-size image and 720p is
+  too coarse for that. DJI_1001 (1080p) runs on the defaults.
+- **Heights need a known focal length.** DJI_1001's log has no height above ground, so its focal
+  cannot be measured from the video; horizontal positions do not depend on it, heights do. The report
+  card now says so on every such run; give the camera's calibration (Settings > Camera) for heights.
+- **The optional map alignment is not reliable yet:** on flight01 it moved the model 3.3 m the wrong
+  way. The earlier 0.29 m figure came from a map-aligned run with older settings and could not be
+  reproduced; use the GPS-only numbers above.
+- **Measured** means a mesh vertex within 1.5 voxels of a depth that another camera confirmed (depth
+  agreement and a 1-pixel round trip). On flight01, cells tagged MEASURED are 0.98 m from the LiDAR
+  terrain model; LOW-confidence and INFERRED cells are 3-4 m away. Ground no camera measured is
+  left open, never invented.
+- **Moving traffic stays out of the model:** on the DJI_1001 highway, 53 moving vehicles were found
+  in the video frames and none of them left a bump in the 3D surface; with the cross-view depth
+  check switched off, 8 of the same 53 (15 %) did.
 
 ## Pipeline stages
 
@@ -143,11 +221,16 @@ backbone with full-3D fusion; `heightfield` reports an error when the flight is 
 
 ## Benchmark
 
-The flight01 accuracy numbers above come from the PinPoint validation dataset
-([doi:10.5281/zenodo.22671839](https://doi.org/10.5281/zenodo.22671839)); the
-method and full results are in [evidence/flight01-benchmark.md](evidence/flight01-benchmark.md).
-flight01 runs need `--telemetry-offset 121.66`: the clip's frame 0 is mkv PTS
-120.464 s, and the log runs 1.2 s ahead of the mkv clock.
+The flight01 and flight02 numbers come from the PinPoint validation dataset
+([doi:10.5281/zenodo.22671839](https://doi.org/10.5281/zenodo.22671839)); how
+they were measured and every run is in
+[evidence/validation-2026-09-28.md](evidence/validation-2026-09-28.md). To run
+a PinPoint clip, give the clip's start in the original video plus the dataset's
+sync as the telemetry offset (flight01: frame 0 of the clip at 120.967 s ->
+`--telemetry-offset 122.167`), the camera calibration
+(`--hfov 72.3 --dist=-0.241,0.050,0,0`) and SIFT matching. The older
+[evidence/flight01-benchmark.md](evidence/flight01-benchmark.md) records the
+development history; its map-aligned figures are superseded.
 
 ## Setup
 
@@ -197,6 +280,12 @@ Enter finishes; Backspace undoes a point; Esc cancels):
   (Google Earth), in WGS84 with sea-level elevations.
 
 A measurement touching INFERRED surface carries a warning.
+
+**Video beside the model** (View > Video Beside Model, Ctrl+Shift+V): scrub
+through the keyframes and the drone's own video frame appears next to the 3D
+view, with the camera that took it highlighted; *Look through this camera*
+puts the 3D view at that camera with its field of view, so the frame and the
+reconstruction can be compared directly.
 
 ## Moving objects and semantic masking
 

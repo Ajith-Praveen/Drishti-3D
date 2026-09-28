@@ -1,0 +1,53 @@
+===== PART 1: paste into ElevenLabs, generate, download =====
+This is Drishti 3D.
+<break time="1.5s" />
+It turns a single drone flight into a measured, geo-referenced 3D model.
+<break time="1.5s" />
+The challenge from N T R O: from one pass of drone video, build a 3D model accurate to a metre, in under fifteen minutes per ten minutes of video.
+<break time="1.5s" />
+Our input is an ordinary drone video, here an eleven minute flight over a town, with the drone's G P S log.
+<break time="1.5s" />
+In our desktop app, load the video and the flight log, and press Run.
+<break time="1.5s" />
+Each stage runs on its own.
+<break time="1.5s" />
+It picks sharp keyframes, matches features between them, and solves where every camera was.
+<break time="1.5s" />
+Then depth is measured, view by view, and the model builds up, live on screen.
+<break time="1.5s" />
+Under the hood, Light Glue matches features on the G P U, and our own bundle adjustment solves the cameras, and calibrates the lens.
+<break time="1.5s" />
+Plane sweep stereo measures depth, cross view checks keep only confirmed depth, and it is all fused into one mesh.
+<break time="1.5s" />
+So it is real 3D, not a height map.
+<break time="1.5s" />
+Trees and houses keep their true shape, instead of turning into prisms.
+<break time="1.5s" />
+The result is a textured model of about eight million points, and over eighty percent of it is directly measured.
+
+===== PART 2: paste into ElevenLabs, generate, download =====
+Every surface is colour coded by confidence.
+<break time="1.5s" />
+Green is measured by two or more cameras, yellow is low confidence, and red is inferred.
+<break time="1.5s" />
+Measurements snap to the surface.
+<break time="1.5s" />
+Point coordinates, distance, roof area, volume, and elevation profiles, ready to export to Geo JSON or K M L.
+<break time="1.5s" />
+Here, a roof of about eight hundred and fifty square metres, and a hundred metre stretch of road.
+<break time="1.5s" />
+Each run also writes standard files.
+<break time="1.5s" />
+O B J, P L Y, L A S, G L T F and F B X models, and Geo TIFF maps, like this true orthomosaic.
+<break time="1.5s" />
+On a public benchmark flight in Spain, median error is under thirty centimetres against the national I G N reference.
+<break time="1.5s" />
+And our eleven minute flight is processed in about seven minutes, on one laptop.
+<break time="1.5s" />
+It is built with Python, PyTorch on Apple Metal or NVIDIA CUDA, Open C V, Open 3D, and a Q T and V T K desktop app.
+<break time="1.5s" />
+It is covered by seven hundred and thirty nine automated tests.
+<break time="1.5s" />
+Drishti 3D. One flight, a 3D model you can measure.
+<break time="1.5s" />
+Thank you.

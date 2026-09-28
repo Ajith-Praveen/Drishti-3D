@@ -1,0 +1,29 @@
+SLIDE 2 — text (headings 16 pt bold, bullets 14 pt; colour #1F497D as in the template)
+
+IDEA TITLE (slide title):
+DRISHTI-3D: One Flight → Measured 3D
+
+Proposed Solution (Describe your Idea/Solution/Prototype)
+DRISHTI-3D is an offline desktop app that turns one pass of drone video + GPS log into a georeferenced, measurable 3D model.
+
+Detailed explanation of the proposed solution
+• Video + GPS log → georeferenced, measurable 3D model
+• GPU stereo measures every view, fused in true 3D
+• Offline desktop app with measurement tools
+  [diagram: s2_A_flow]
+
+How it addresses the problem
+• Meets every target in the problem statement's output table
+• Proven end to end on 2 real drone flights
+  [diagram: s2_B_targets]
+
+Innovation and uniqueness of the solution
+• Our own reconstruction engine, not a wrapper
+• Every surface tagged: measured or inferred
+  [diagram: s2_C_unique]
+
+Footnote (9–10 pt, grey):
+*0.29 m: median horizontal agreement with Spain's IGN orthophoto (flight01, 13 features) · 13×: camera solve 368 s → 29 s vs our first solver · COLMAP 33 min sparse vs DRISHTI 9.5 min dense, same Mac, COLMAP without CUDA.
+
+Team oval: Robos.Inc
+Layout: intro line under the heading; text column left (0.45–6.6 in), diagrams right at x = 6.8 in, 6.1 in wide, one per row (rows start at 1.84 in, 1.69 in apart).

@@ -1,0 +1,143 @@
+{
+ "part1": 12,
+ "lines": [
+  {
+   "id": "p01",
+   "section": 1,
+   "text": "One drone flight. Hundreds of rooftops. A whole neighbourhood of possibilities.",
+   "spoken": "One drone flight. Hundreds of rooftops. A whole neighbourhood of possibilities."
+  },
+  {
+   "id": "p02",
+   "section": 1,
+   "text": "Now imagine being able to measure that neighbourhood: the width of a road, the area of a roof, even the volume of a stockpile. All from the video you just captured.",
+   "spoken": "Now imagine being able to measure that neighbourhood: the width of a road, the area of a roof, even the volume of a stockpile. All from the video you just captured."
+  },
+  {
+   "id": "p03",
+   "section": 1,
+   "text": "Meet DRISHTI-3D.",
+   "spoken": "Meet Drishti 3D!"
+  },
+  {
+   "id": "p04",
+   "section": 2,
+   "text": "Built for NTRO's single-pass reconstruction challenge, DRISHTI turns drone video and flight data into a georeferenced 3D model.",
+   "spoken": "Built for N T R O's single-pass reconstruction challenge, Drishti turns drone video and flight data into a geo-referenced 3D model."
+  },
+  {
+   "id": "p05",
+   "section": 2,
+   "text": "Here's our working MVP. Load the video, add the flight log, and hit Run. The application selects useful frames, solves the camera positions, and builds the model as you watch.",
+   "spoken": "Here's our working M V P. Load the video, add the flight log, and hit Run! The application selects useful frames, solves the camera positions, and builds the model as you watch."
+  },
+  {
+   "id": "p06",
+   "section": 2,
+   "text": "Then you can explore it, measure it, and export the results\u2014all inside the same desktop application.",
+   "spoken": "Then you can explore it, measure it, and export the results, all inside the same desktop application."
+  },
+  {
+   "id": "p07",
+   "section": 3,
+   "text": "The exciting part is the engine we built underneath.",
+   "spoken": "The exciting part is the engine we built underneath."
+  },
+  {
+   "id": "p08",
+   "section": 3,
+   "text": "We developed our own camera-optimisation solver and GPU stereo implementation, designed around the challenges of a single flight path.",
+   "spoken": "We developed our own camera optimisation solver and G P U stereo implementation, designed around the challenges of a single flight path."
+  },
+  {
+   "id": "p09",
+   "section": 3,
+   "text": "Our custom solver made the camera-optimisation steps around thirteen times faster than our earlier implementation on the benchmark flight.",
+   "spoken": "Our custom solver made the camera optimisation steps around thirteen times faster than our earlier implementation on the benchmark flight."
+  },
+  {
+   "id": "p10",
+   "section": 3,
+   "text": "We also tested against COLMAP, the standard research tool, on the same laptop. COLMAP took thirty-three minutes for a sparse model. DRISHTI delivered a dense, textured, georeferenced model in under ten minutes.",
+   "spoken": "We also tested against Col Map, the standard research tool, on the same laptop. Col Map took thirty-three minutes for a sparse model. Drishti delivered a dense, textured, geo-referenced model in under ten minutes."
+  },
+  {
+   "id": "p11",
+   "section": 3,
+   "text": "And where the camera position is exact, our surface landed almost a metre closer to the surveyed points than COLMAP's.",
+   "spoken": "And where the camera position is exact, our surface landed almost a metre closer to the surveyed points than Col Map's."
+  },
+  {
+   "id": "p12",
+   "section": 3,
+   "text": "That's the engineering behind our promise: turn captured footage into usable geometry, with evidence for what the model has measured.",
+   "spoken": "That's the engineering behind our promise: turn captured footage into usable geometry, with evidence for what the model has measured."
+  },
+  {
+   "id": "p13",
+   "section": 4,
+   "text": "Here's how it comes together.",
+   "spoken": "Here's how it comes together."
+  },
+  {
+   "id": "p14",
+   "section": 4,
+   "text": "First, video and telemetry are aligned, and sharp, overlapping frames are selected.",
+   "spoken": "First, video and telemetry are aligned, and sharp, overlapping frames are selected."
+  },
+  {
+   "id": "p15",
+   "section": 4,
+   "text": "LightGlue connects matching features across those frames. Our bundle-adjustment solver then refines the cameras and lens parameters using image evidence and GPS.",
+   "spoken": "Light Glue connects matching features across those frames. Our bundle adjustment solver then refines the cameras and lens parameters using image evidence and G P S."
+  },
+  {
+   "id": "p16",
+   "section": 4,
+   "text": "Next, our GPU stereo implementation estimates depth. Neighbouring views cross-check those estimates before Open3D fuses them into a textured surface.",
+   "spoken": "Next, our G P U stereo implementation estimates depth. Neighbouring views cross check those estimates before Open 3D fuses them into a textured surface."
+  },
+  {
+   "id": "p17",
+   "section": 4,
+   "text": "The pipeline reports progress and previews to the desktop viewer while it runs. Georeferencing connects the finished model to real-world coordinates.",
+   "spoken": "The pipeline reports progress and previews to the desktop viewer while it runs. Geo-referencing connects the finished model to real-world coordinates."
+  },
+  {
+   "id": "p18",
+   "section": 5,
+   "text": "Now let's use it.",
+   "spoken": "Now let's use it!"
+  },
+  {
+   "id": "p19",
+   "section": 5,
+   "text": "Switch to confidence colours to inspect reliability. Click across a road to measure distance. Outline a roof for its area. Check a volume, or trace an elevation profile.",
+   "spoken": "Switch to confidence colours to inspect reliability. Click across a road to measure distance. Outline a roof for its area. Check a volume, or trace an elevation profile."
+  },
+  {
+   "id": "p20",
+   "section": 5,
+   "text": "Then take those measurements into your GIS workflow with GeoJSON or KML, alongside the exported models and maps.",
+   "spoken": "Then take those measurements into your G I S workflow with Geo JSON or K M L, alongside the exported models and maps."
+  },
+  {
+   "id": "p21",
+   "section": 6,
+   "text": "Our recorded reconstruction contains around eight million vertices. On a separate Spain benchmark, thirteen stable features showed twenty-nine-centimetre median horizontal agreement with the national reference orthophoto.",
+   "spoken": "Our recorded reconstruction contains around eight million vertices. On a separate Spain benchmark, thirteen stable features showed twenty-nine centimetre median horizontal agreement with the national reference orthophoto."
+  },
+  {
+   "id": "p22",
+   "section": 6,
+   "text": "Our unique value brings these pieces together: our own reconstruction core, visible confidence on every surface, and practical measurement tools\u2014from one flight to usable results.",
+   "spoken": "Our unique value brings these pieces together: our own reconstruction core, visible confidence on every surface, and practical measurement tools, from one flight to usable results."
+  },
+  {
+   "id": "p23",
+   "section": 6,
+   "text": "DRISHTI-3D. Fly once. Explore more. Measure what matters.",
+   "spoken": "Drishti 3D. Fly once. Explore more. Measure what matters."
+  }
+ ]
+}
